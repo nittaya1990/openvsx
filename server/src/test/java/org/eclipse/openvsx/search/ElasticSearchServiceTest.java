@@ -15,14 +15,16 @@ import static org.mockito.ArgumentMatchers.any;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
-import org.eclipse.openvsx.entities.Extension;
-import org.eclipse.openvsx.entities.ExtensionVersion;
-import org.eclipse.openvsx.entities.Namespace;
-import org.eclipse.openvsx.entities.NamespaceMembership;
-import org.eclipse.openvsx.entities.PersonalAccessToken;
-import org.eclipse.openvsx.entities.UserData;
+import org.eclipse.openvsx.cache.LatestExtensionVersionCacheKeyGenerator;
+import org.eclipse.openvsx.cache.LatestExtensionVersionDTOCacheKeyGenerator;
+import org.eclipse.openvsx.entities.*;
 import org.eclipse.openvsx.repositories.RepositoryService;
+import org.eclipse.openvsx.util.ErrorResultException;
+import org.eclipse.openvsx.util.TargetPlatform;
+import org.eclipse.openvsx.util.VersionService;
+import org.junit.Assert;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mockito;
@@ -32,13 +34,14 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
 import org.springframework.data.elasticsearch.core.IndexOperations;
+import org.springframework.data.elasticsearch.core.index.Settings;
 import org.springframework.data.elasticsearch.core.mapping.IndexCoordinates;
 import org.springframework.data.elasticsearch.core.query.IndexQuery;
 import org.springframework.data.util.Streamable;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 @ExtendWith(SpringExtension.class)
-public class SearchServiceTest {
+public class ElasticSearchServiceTest {
 
     @MockBean
     RepositoryService repositories;
@@ -47,16 +50,16 @@ public class SearchServiceTest {
     ElasticsearchOperations searchOperations;
 
     @Autowired
-    SearchService search;
+    ElasticSearchService search;
 
     @Test
     public void testRelevanceAverageRating() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 3.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
-        var ext2 = mockExtension("bar", 4.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",3.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext2 = mockExtension( "bar", "n2", "u2", 4.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -64,11 +67,11 @@ public class SearchServiceTest {
     @Test
     public void testRelevanceReviewCount() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 4.0, 2, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
-        var ext2 = mockExtension("bar", 4.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",4.0, 2, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext2 = mockExtension("bar", "n2", "u2",4.0, 100, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -76,11 +79,11 @@ public class SearchServiceTest {
     @Test
     public void testRelevanceDownloadCount() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 0.0, 0, 1, LocalDateTime.parse("2020-01-01T00:00"), false, false);
-        var ext2 = mockExtension("bar", 0.0, 0, 10, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",0.0, 0, 1, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext2 = mockExtension("bar", "n2", "u2",0.0, 0, 10, LocalDateTime.parse("2020-01-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -88,11 +91,11 @@ public class SearchServiceTest {
     @Test
     public void testRelevanceTimestamp() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 0.0, 0, 0, LocalDateTime.parse("2020-02-01T00:00"), false, false);
-        var ext2 = mockExtension("bar", 0.0, 0, 0, LocalDateTime.parse("2020-10-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n2", "u2",0.0, 0, 0, LocalDateTime.parse("2020-02-01T00:00"), false, false);
+        var ext2 = mockExtension("bar", "n1", "u1",0.0, 0, 0, LocalDateTime.parse("2020-10-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -100,11 +103,11 @@ public class SearchServiceTest {
     @Test
     public void testRelevanceUnverified1() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, true);
-        var ext2 = mockExtension("bar", 4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, true);
+        var ext2 = mockExtension("bar", "n2", "u2",4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -112,11 +115,11 @@ public class SearchServiceTest {
     @Test
     public void testRelevanceUnverified2() throws Exception {
         var index = mockIndex(true);
-        var ext1 = mockExtension("foo", 4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), true, false);
-        var ext2 = mockExtension("bar", 4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), true, false);
+        var ext2 = mockExtension("bar", "n2", "u2",4.0, 10, 10, LocalDateTime.parse("2020-10-01T00:00"), false, false);
         search.updateSearchEntry(ext1);
         search.updateSearchEntry(ext2);
-        
+
         assertThat(index.entries).hasSize(2);
         assertThat(index.entries.get(0).relevance).isLessThan(index.entries.get(1).relevance);
     }
@@ -126,7 +129,7 @@ public class SearchServiceTest {
         var index = mockIndex(true);
         mockExtensions();
         search.updateSearchIndex(false);
-        
+
         assertThat(index.created).isFalse();
         assertThat(index.deleted).isFalse();
         assertThat(index.entries).hasSize(3);
@@ -137,7 +140,7 @@ public class SearchServiceTest {
         var index = mockIndex(false);
         mockExtensions();
         search.updateSearchIndex(false);
-        
+
         assertThat(index.created).isTrue();
         assertThat(index.deleted).isFalse();
         assertThat(index.entries).hasSize(3);
@@ -148,7 +151,7 @@ public class SearchServiceTest {
         var index = mockIndex(true);
         mockExtensions();
         search.updateSearchIndex(true);
-        
+
         assertThat(index.created).isTrue();
         assertThat(index.deleted).isTrue();
         assertThat(index.entries).hasSize(3);
@@ -159,12 +162,21 @@ public class SearchServiceTest {
         var index = mockIndex(false);
         mockExtensions();
         search.updateSearchIndex(true);
-        
+
         assertThat(index.created).isTrue();
         assertThat(index.deleted).isFalse();
         assertThat(index.entries).hasSize(3);
     }
 
+    @Test
+    public void testSearchResultWindowTooLarge() {
+        mockIndex(true);
+
+        var options = new ISearchService.Options("foo", "bar", "universal", 50, 10000, null, null, false);
+        var searchHits = search.search(options);
+        assertThat(searchHits.getSearchHits()).isEmpty();
+        assertThat(searchHits.getTotalHits()).isEqualTo(0L);
+    }
 
     //---------- UTILITY ----------//
 
@@ -198,6 +210,9 @@ public class SearchServiceTest {
         Mockito.when(indexOps.getIndexCoordinates())
             .thenReturn(IndexCoordinates.of("extensions"));
 
+        Mockito.when(indexOps.getSettings(true))
+                .thenReturn(new Settings(Map.of("index.max_result_window", "10000")));
+
         Mockito.when(indexOps.exists())
             .thenReturn(exists);
         Mockito.when(indexOps.delete())
@@ -215,36 +230,40 @@ public class SearchServiceTest {
         return index;
     }
 
-    private Extension mockExtension(String name, double averageRating, int ratingCount, int downloadCount,
+    private Extension mockExtension(String name, String namespaceName, String userName, double averageRating, int ratingCount, int downloadCount,
             LocalDateTime timestamp, boolean isUnverified, boolean isUnrelated) {
         var extension = new Extension();
         extension.setName(name);
+        extension.setId(name.hashCode());
         extension.setAverageRating(averageRating);
         extension.setDownloadCount(downloadCount);
         Mockito.when(repositories.countActiveReviews(extension))
                 .thenReturn((long) ratingCount);
         var namespace = new Namespace();
-        namespace.setName("test");
+        namespace.setName(namespaceName);
         extension.setNamespace(namespace);
         Mockito.when(repositories.countMemberships(namespace, NamespaceMembership.ROLE_OWNER))
-                .thenReturn(isUnverified ? 0l : 1l);
+                .thenReturn(isUnverified ? 0L : 1L);
         var extVer = new ExtensionVersion();
-        extVer.setExtension(extension);
+        extVer.setTargetPlatform(TargetPlatform.NAME_UNIVERSAL);
         extVer.setTimestamp(timestamp);
-        extension.setLatest(extVer);
+        extVer.setActive(true);
+        extVer.setExtension(extension);
+        extension.getVersions().add(extVer);
         var user = new UserData();
+        user.setLoginName(userName);
         var token = new PersonalAccessToken();
         token.setUser(user);
         extVer.setPublishedWith(token);
         Mockito.when(repositories.countMemberships(user, namespace))
-                .thenReturn(isUnrelated ? 0l : 1l);
+                .thenReturn(isUnrelated ? 0L : 1L);
         return extension;
     }
 
     private void mockExtensions() {
-        var ext1 = mockExtension("foo", 3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
-        var ext2 = mockExtension("bar", 3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
-        var ext3 = mockExtension("baz", 3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext1 = mockExtension("foo", "n1", "u1",3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext2 = mockExtension("bar", "n2", "u2", 3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
+        var ext3 = mockExtension("baz", "n3", "u3", 3.0, 1, 0, LocalDateTime.parse("2020-01-01T00:00"), false, false);
         Mockito.when(repositories.findAllActiveExtensions())
                 .thenReturn(Streamable.of(ext1, ext2, ext3));
     }
@@ -258,8 +277,28 @@ public class SearchServiceTest {
     @TestConfiguration
     static class TestConfig {
         @Bean
-        SearchService searchService() {
-            return new SearchService();
+        ElasticSearchService searchService() {
+            return new ElasticSearchService();
+        }
+
+        @Bean
+        RelevanceService relevanceService() {
+            return new RelevanceService();
+        }
+
+        @Bean
+        VersionService versionService() {
+            return new VersionService();
+        }
+
+        @Bean
+        LatestExtensionVersionCacheKeyGenerator latestExtensionVersionCacheKeyGenerator() {
+            return new LatestExtensionVersionCacheKeyGenerator();
+        }
+
+        @Bean
+        LatestExtensionVersionDTOCacheKeyGenerator latestExtensionVersionDTOCacheKeyGenerator() {
+            return new LatestExtensionVersionDTOCacheKeyGenerator();
         }
     }
     

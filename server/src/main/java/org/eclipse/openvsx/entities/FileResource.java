@@ -9,13 +9,9 @@
  ********************************************************************************/
 package org.eclipse.openvsx.entities;
 
-import javax.persistence.Basic;
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.FetchType;
-import javax.persistence.GeneratedValue;
-import javax.persistence.Id;
-import javax.persistence.OneToOne;
+import org.hibernate.annotations.Fetch;
+
+import javax.persistence.*;
 
 @Entity
 public class FileResource {
@@ -27,7 +23,7 @@ public class FileResource {
     public static final String README = "readme";
     public static final String LICENSE = "license";
     public static final String CHANGELOG = "changelog";
-    public static final String WEB_RESOURCE = "web-resource";
+    public static final String RESOURCE = "resource";
 
     // Storage types
     public static final String STORAGE_DB = "database";
@@ -100,5 +96,4 @@ public class FileResource {
     public void setStorageType(String storageType) {
         this.storageType = storageType;
     }
-    
 }

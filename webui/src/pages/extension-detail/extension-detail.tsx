@@ -9,13 +9,13 @@
  ********************************************************************************/
 
 import * as React from 'react';
-import { Typography, Box, createStyles, Theme, WithStyles, withStyles, Container, Link, Avatar, Paper } from '@material-ui/core';
+import { Typography, Box, createStyles, Theme, WithStyles, withStyles, Container, Link, Avatar, Paper, Badge } from '@material-ui/core';
 import { RouteComponentProps, Switch, Route, Link as RouteLink } from 'react-router-dom';
 import SaveAltIcon from '@material-ui/icons/SaveAlt';
 import VerifiedUserIcon from '@material-ui/icons/VerifiedUser';
 import WarningIcon from '@material-ui/icons/Warning';
 import { MainContext } from '../../context';
-import { createRoute } from '../../utils';
+import { createRoute, getTargetPlatforms } from '../../utils';
 import { DelayedLoadIndicator } from '../../components/delayed-load-indicator';
 import { HoverPopover } from '../../components/hover-popover';
 import { Extension, UserData, isError } from '../../extension-registry-types';
@@ -30,18 +30,31 @@ export namespace ExtensionDetailRoutes {
     export namespace Parameters {
         export const NAMESPACE = ':namespace';
         export const NAME = ':name';
+        export const TARGET = `:target(${getTargetPlatforms().join('|')})`;
         export const VERSION = ':version?';
     }
 
     export const ROOT = 'extension';
     export const MAIN = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.VERSION]);
+    export const MAIN_TARGET = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.TARGET, Parameters.VERSION]);
     export const LATEST = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME]);
-    export const PREVIEW = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, 'preview']);
+    export const LATEST_TARGET = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.TARGET]);
+    export const PRE_RELEASE = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, 'pre-release']);
+    export const PRE_RELEASE_TARGET = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.TARGET, 'pre-release']);
     export const REVIEWS = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, 'reviews']);
+    export const REVIEWS_TARGET = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.TARGET, 'reviews']);
     export const CHANGES = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, 'changes']);
+    export const CHANGES_TARGET = createRoute([ROOT, Parameters.NAMESPACE, Parameters.NAME, Parameters.TARGET, 'changes']);
 }
 
 const detailStyles = (theme: Theme) => createStyles({
+    badge: {
+        top: theme.spacing(1),
+        right: theme.spacing(-5)
+    },
+    badgePadding: {
+        paddingTop: theme.spacing(1)
+    },
     link: {
         display: 'contents',
         cursor: 'pointer',
@@ -147,6 +160,8 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
     static contextType = MainContext;
     declare context: MainContext;
 
+    protected abortController = new AbortController();
+
     constructor(props: ExtensionDetailComponent.Props) {
         super(props);
         this.state = { loading: true };
@@ -158,10 +173,17 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
         this.updateExtension(params);
     }
 
+    componentWillUnmount(): void {
+        this.abortController.abort();
+        if (this.state.icon) {
+            URL.revokeObjectURL(this.state.icon);
+        }
+    }
+
     componentDidUpdate(prevProps: ExtensionDetailComponent.Props): void {
         const prevParams = prevProps.match.params as ExtensionDetailComponent.Params;
         const newParams = this.props.match.params as ExtensionDetailComponent.Params;
-        if (newParams.namespace !== prevParams.namespace || newParams.name !== prevParams.name
+        if (newParams.namespace !== prevParams.namespace || newParams.name !== prevParams.name || newParams.target !== prevParams.target
                 || newParams.version !== prevParams.version && !versionPointsToTab(newParams)
                 && !(newParams.version === undefined && versionPointsToTab(prevParams))) {
             if (newParams.namespace === prevParams.namespace && newParams.name === prevParams.name) {
@@ -183,12 +205,13 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
     protected async updateExtension(params: ExtensionDetailComponent.Params): Promise<void> {
         const extensionUrl = this.getExtensionApiUrl(params);
         try {
-            const extension = await this.context.service.getExtensionDetail(extensionUrl);
+            const extension = await this.context.service.getExtensionDetail(this.abortController, extensionUrl);
             if (isError(extension)) {
                 throw extension;
             }
             document.title = `${extension.displayName || extension.name} – ${this.context.pageSettings.pageTitle}`;
-            this.setState({ extension, loading: false });
+            const icon = await this.updateIcon(extension);
+            this.setState({ extension, icon, loading: false });
         } catch (err) {
             if (err && err.status === 404) {
                 this.setState({
@@ -202,6 +225,14 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
         }
     }
 
+    protected async updateIcon(extension: Extension): Promise<string | undefined> {
+        if (this.state.icon) {
+            URL.revokeObjectURL(this.state.icon);
+        }
+
+        return await this.context.service.getExtensionIcon(this.abortController, extension);
+    }
+
     protected onReviewUpdate = (): void => {
         const params = this.props.match.params as ExtensionDetailComponent.Params;
         this.updateExtension(params);
@@ -209,17 +240,19 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
 
     protected onVersionSelect = (version: string): void => {
         const params = this.props.match.params as ExtensionDetailComponent.Params;
-        let newRoute: string;
-        if (version === 'latest') {
-            newRoute = createRoute([ExtensionDetailRoutes.ROOT, params.namespace, params.name]);
-        } else {
-            newRoute = createRoute([ExtensionDetailRoutes.ROOT, params.namespace, params.name, version]);
+        const arr = [ExtensionDetailRoutes.ROOT, params.namespace, params.name];
+        if (params.target) {
+            arr.push(params.target);
         }
-        this.props.history.push(newRoute);
+        if (version !== 'latest') {
+            arr.push(version);
+        }
+
+        this.props.history.push(createRoute(arr));
     };
 
     render(): React.ReactNode {
-        const { extension } = this.state;
+        const { extension, icon } = this.state;
         if (!extension) {
             return <>
                 <DelayedLoadIndicator loading={this.state.loading} />
@@ -249,8 +282,8 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
                     <Box className={classes.header}>
                         {this.renderBanner(extension, headerTheme)}
                         <Box className={classes.iconAndInfo}>
-                            <img src={extension.files.icon || this.context.pageSettings.urls.extensionDefaultIcon}
-                                className={classes.extensionLogo}
+                            <img src={icon || this.context.pageSettings.urls.extensionDefaultIcon }
+                                className={`${classes.extensionLogo} ${classes.badgePadding}`}
                                 alt={extension.displayName || extension.name} />
                             {this.renderHeaderInfo(extension, headerTheme)}
                         </Box>
@@ -265,19 +298,20 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
                     </Box>
                     <Box>
                         <Switch>
-                            <Route path={ExtensionDetailRoutes.CHANGES}>
+                            <Route path={[ExtensionDetailRoutes.CHANGES_TARGET, ExtensionDetailRoutes.CHANGES]}>
                                 <ExtensionDetailChanges
                                     extension={extension}
                                 />
                             </Route>
-                            <Route path={ExtensionDetailRoutes.REVIEWS}>
+                            <Route path={[ExtensionDetailRoutes.REVIEWS_TARGET, ExtensionDetailRoutes.REVIEWS]}>
                                 <ExtensionDetailReviews
                                     extension={extension}
                                     reviewsDidUpdate={this.onReviewUpdate}
                                 />
                             </Route>
-                            <Route path={ExtensionDetailRoutes.LATEST}>
+                            <Route path={[ExtensionDetailRoutes.LATEST_TARGET, ExtensionDetailRoutes.LATEST]}>
                                 <ExtensionDetailOverview
+                                    params={this.props.match.params as ExtensionDetailComponent.Params}
                                     extension={extension}
                                     selectVersion={this.onVersionSelect}
                                 />
@@ -320,10 +354,12 @@ export class ExtensionDetailComponent extends React.Component<ExtensionDetailCom
         const downloadCountFormatted = numberFormat.format(extension.downloadCount || 0);
         const reviewCountFormatted = numberFormat.format(extension.reviewCount || 0);
         return (
-        <Box overflow='auto'>
-            <Typography variant='h5' className={classes.titleRow}>
-                {extension.displayName || extension.name}
-            </Typography>
+        <Box overflow='auto' className={classes.badgePadding}>
+            <Badge color='secondary' badgeContent='Preview' invisible={!extension.preview} classes={{ badge: classes.badge }}>
+                <Typography variant='h5' className={classes.titleRow}>
+                    { extension.displayName || extension.name}
+                </Typography>
+            </Badge>
             <Box className={`${themeClass} ${classes.infoRowBreak} ${classes.alignVertically}`}>
                 <Box className={classes.alignVertically}>
                     {this.renderAccessInfo(extension, themeClass)}&nbsp;<span
@@ -458,6 +494,7 @@ export namespace ExtensionDetailComponent {
 
     export interface State {
         extension?: Extension;
+        icon?: string;
         loading: boolean;
         notFoundError?: string;
     }
@@ -465,6 +502,7 @@ export namespace ExtensionDetailComponent {
     export interface Params {
         readonly namespace: string;
         readonly name: string;
+        readonly target? : string;
         readonly version?: string;
     }
 }

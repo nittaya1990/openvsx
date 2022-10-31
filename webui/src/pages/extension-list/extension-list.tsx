@@ -39,6 +39,7 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
     protected enableLoadMore: boolean;
     protected lastRequestedPage: number = 0;
     protected pageOffset: number = 0;
+    protected abortController = new AbortController();
 
     constructor(props: ExtensionListComponent.Props) {
         super(props);
@@ -58,6 +59,7 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
     }
 
     componentWillUnmount(): void {
+        this.abortController.abort();
         clearTimeout(this.cancellationToken.timeout);
         this.enableLoadMore = false;
     }
@@ -71,7 +73,7 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
         debounce(
             async () => {
                 try {
-                    const result = await this.context.service.search(newFilter);
+                    const result = await this.context.service.search(this.abortController, newFilter);
                     if (isError(result)) {
                         throw result;
                     }
@@ -100,6 +102,11 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
     }
 
     protected loadMore = async (p: number): Promise<void> => {
+        if (this.state.loading) {
+            return;
+        }
+
+        this.setState({loading: true});
         this.lastRequestedPage = p;
         const filter = copyFilter(this.state.appliedFilter);
         if (!isSameFilter(this.props.filter, filter)) {
@@ -107,7 +114,7 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
         }
         try {
             filter.offset = (p - this.pageOffset) * this.filterSize;
-            const result = await this.context.service.search(filter);
+            const result = await this.context.service.search(this.abortController, filter);
             if (isError(result)) {
                 throw result;
             }
@@ -130,6 +137,8 @@ export class ExtensionListComponent extends React.Component<ExtensionListCompone
             }
         } catch (err) {
             this.context.handleError(err);
+        } finally {
+            this.setState({loading: false});
         }
     };
 

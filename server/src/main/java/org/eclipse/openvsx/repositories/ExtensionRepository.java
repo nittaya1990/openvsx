@@ -16,6 +16,8 @@ import org.springframework.data.util.Streamable;
 import org.eclipse.openvsx.entities.Extension;
 import org.eclipse.openvsx.entities.Namespace;
 
+import java.time.LocalDateTime;
+
 public interface ExtensionRepository extends Repository<Extension, Long> {
 
     Streamable<Extension> findByNameIgnoreCase(String name);
@@ -38,5 +40,4 @@ public interface ExtensionRepository extends Repository<Extension, Long> {
 
     @Query("select max(e.downloadCount) from Extension e")
     int getMaxDownloadCount();
-
 }

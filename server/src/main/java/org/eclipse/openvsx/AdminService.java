@@ -9,35 +9,28 @@
  ********************************************************************************/
 package org.eclipse.openvsx;
 
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.LinkedHashSet;
+import java.time.DateTimeException;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import javax.persistence.EntityManager;
 import javax.transaction.Transactional;
 
 import com.google.common.base.Strings;
-import com.google.common.collect.Lists;
 
-import org.apache.jena.ext.com.google.common.collect.Maps;
+import org.eclipse.openvsx.cache.CacheService;
 import org.eclipse.openvsx.eclipse.EclipseService;
-import org.eclipse.openvsx.entities.Extension;
-import org.eclipse.openvsx.entities.ExtensionVersion;
-import org.eclipse.openvsx.entities.FileResource;
-import org.eclipse.openvsx.entities.Namespace;
-import org.eclipse.openvsx.entities.PersistedLog;
-import org.eclipse.openvsx.entities.UserData;
-import org.eclipse.openvsx.json.ExtensionJson;
-import org.eclipse.openvsx.json.NamespaceJson;
-import org.eclipse.openvsx.json.ResultJson;
-import org.eclipse.openvsx.json.UserPublishInfoJson;
+import org.eclipse.openvsx.entities.*;
+import org.eclipse.openvsx.json.*;
 import org.eclipse.openvsx.repositories.RepositoryService;
-import org.eclipse.openvsx.search.SearchService;
+import org.eclipse.openvsx.search.SearchUtilService;
 import org.eclipse.openvsx.storage.StorageUtilService;
 import org.eclipse.openvsx.util.ErrorResultException;
 import org.eclipse.openvsx.util.TimeUtil;
 import org.eclipse.openvsx.util.UrlUtil;
+import org.eclipse.openvsx.util.VersionService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -52,6 +45,9 @@ public class AdminService {
     ExtensionService extensions;
 
     @Autowired
+    VersionService versions;
+
+    @Autowired
     EntityManager entityManager;
 
     @Autowired
@@ -61,7 +57,7 @@ public class AdminService {
     ExtensionValidator validator;
 
     @Autowired
-    SearchService search;
+    SearchUtilService search;
 
     @Autowired
     EclipseService eclipse;
@@ -69,24 +65,33 @@ public class AdminService {
     @Autowired
     StorageUtilService storageUtil;
 
+    @Autowired
+    CacheService cache;
+
     @Transactional(rollbackOn = ErrorResultException.class)
-    public ResultJson deleteExtension(String namespaceName, String extensionName, String version, UserData admin)
+    public ResultJson deleteExtension(String namespaceName, String extensionName, UserData admin)
             throws ErrorResultException {
-        if (Strings.isNullOrEmpty(version)) {
-            var extension = repositories.findExtension(extensionName, namespaceName);
-            if (extension == null) {
-                throw new ErrorResultException("Extension not found: " + namespaceName + "." + extensionName,
-                        HttpStatus.NOT_FOUND);
-            }
-            return deleteExtension(extension, admin);
-        } else {
-            var extVersion = repositories.findVersion(version, extensionName, namespaceName);
-            if (extVersion == null) {
-                throw new ErrorResultException("Extension not found: " + namespaceName + "." + extensionName + " version " + version,
-                        HttpStatus.NOT_FOUND);
-            }
-            return deleteExtension(extVersion, admin);
+        var extension = repositories.findExtension(extensionName, namespaceName);
+        if (extension == null) {
+            throw new ErrorResultException("Extension not found: " + namespaceName + "." + extensionName,
+                    HttpStatus.NOT_FOUND);
         }
+        return deleteExtension(extension, admin);
+    }
+
+    @Transactional(rollbackOn = ErrorResultException.class)
+    public ResultJson deleteExtension(String namespaceName, String extensionName, String targetPlatform, String version, UserData admin)
+            throws ErrorResultException {
+        var extVersion = repositories.findVersion(version, targetPlatform, extensionName, namespaceName);
+        if (extVersion == null) {
+            var message = "Extension not found: " + namespaceName + "." + extensionName +
+                    " " + version +
+                    (Strings.isNullOrEmpty(targetPlatform) ? "" : " (" + targetPlatform + ")");
+
+            throw new ErrorResultException(message, HttpStatus.NOT_FOUND);
+        }
+
+        return deleteExtension(extVersion, admin);
     }
 
     protected ResultJson deleteExtension(Extension extension, UserData admin) throws ErrorResultException {
@@ -107,14 +112,15 @@ public class AdminService {
                         .map(ev -> ev.getExtension().getNamespace().getName() + "." + ev.getExtension().getName() + "@" + ev.getVersion())
                         .collect(Collectors.joining(", ")));
         }
-        extension.setLatest(null);
-        extension.setPreview(null);
+
+        cache.evictExtensionJsons(extension);
         for (var extVersion : repositories.findVersions(extension)) {
             removeExtensionVersion(extVersion);
         }
         for (var review : repositories.findAllReviews(extension)) {
             entityManager.remove(review);
         }
+
         entityManager.remove(extension);
         search.removeSearchEntry(extension);
 
@@ -125,16 +131,17 @@ public class AdminService {
 
     protected ResultJson deleteExtension(ExtensionVersion extVersion, UserData admin) {
         var extension = extVersion.getExtension();
-        var versions = Lists.newArrayList(repositories.findVersions(extension));
-        if (versions.size() == 1) {
+        if (repositories.countVersions(extension) == 1) {
             return deleteExtension(extension, admin);
         }
+
+        cache.evictExtensionJsons(extension);
         removeExtensionVersion(extVersion);
-        versions.remove(extVersion);
-        extensions.updateExtension(extension, versions);
+        extension.getVersions().remove(extVersion);
+        extensions.updateExtension(extension);
 
         var result = ResultJson.success("Deleted " + extension.getNamespace().getName() + "." + extension.getName()
-                + " version " + extVersion.getVersion());
+                + " " + extVersion.getVersion());
         logAdminAction(admin, result);
         return result;
     }
@@ -187,7 +194,8 @@ public class AdminService {
         entityManager.persist(namespace);
         return ResultJson.success("Created namespace " + namespace.getName());
     }
-    
+
+    @Transactional
     public UserPublishInfoJson getUserPublishInfo(String provider, String loginName) {
         var user = repositories.findUserByLoginName(provider, loginName);
         if (user == null) {
@@ -202,13 +210,15 @@ public class AdminService {
             if (accessToken.isActive()) {
                 activeAccessTokenNum++;
             }
-            var versions = repositories.findVersionsByAccessToken(accessToken);
-            for (var version : versions) {
+            var versionList = repositories.findVersionsByAccessToken(accessToken).toList();
+            var fileUrls = storageUtil.getFileUrls(versionList, serverUrl, FileResource.DOWNLOAD, FileResource.MANIFEST,
+                    FileResource.ICON, FileResource.README, FileResource.LICENSE, FileResource.CHANGELOG);
+            for (var version : versionList) {
+                var latest = versions.getLatest(version.getExtension(), null, false, true);
                 var json = version.toExtensionJson();
+                json.preview = latest.isPreview();
                 json.active = version.isActive();
-                json.files = Maps.newLinkedHashMapWithExpectedSize(6);
-                storageUtil.addFileUrls(version, serverUrl, json.files, FileResource.DOWNLOAD, FileResource.MANIFEST,
-                        FileResource.ICON, FileResource.README, FileResource.LICENSE, FileResource.CHANGELOG);
+                json.files = fileUrls.get(version.getId());
                 versionJsons.add(json);
             }
         }
@@ -291,4 +301,61 @@ public class AdminService {
         }
     }
 
+    @Transactional
+    public String getAdminStatisticsCsv(int year, int month) throws ErrorResultException {
+        if(year < 0) {
+            throw new ErrorResultException("Year can't be negative", HttpStatus.BAD_REQUEST);
+        }
+        if(month < 1 || month > 12) {
+            throw new ErrorResultException("Month must be a value between 1 and 12", HttpStatus.BAD_REQUEST);
+        }
+
+        var now = LocalDateTime.now();
+        if(year > now.getYear() || (year == now.getYear() && month > now.getMonthValue())) {
+            throw new ErrorResultException("Combination of year and month lies in the future", HttpStatus.BAD_REQUEST);
+        }
+
+        var statistics = repositories.findAdminStatisticsByYearAndMonth(year, month);
+        if(statistics == null) {
+            LocalDateTime startInclusive;
+            try {
+                startInclusive = LocalDateTime.of(year, month, 1, 0, 0);
+            } catch(DateTimeException e) {
+                throw new ErrorResultException("Invalid month or year", HttpStatus.BAD_REQUEST);
+            }
+
+            var currentYearAndMonth = now.getYear() == year && now.getMonthValue() == month;
+            var endExclusive = currentYearAndMonth
+                    ? now.truncatedTo(ChronoUnit.MINUTES)
+                    : startInclusive.plusMonths(1);
+
+            var extensions = repositories.countActiveExtensions(endExclusive);
+            var downloads = repositories.downloadsBetween(startInclusive, endExclusive);
+            var downloadsTotal = repositories.downloadsUntil(endExclusive);
+            var publishers = repositories.countActiveExtensionPublishers(endExclusive);
+            var averageReviewsPerExtension = repositories.averageNumberOfActiveReviewsPerActiveExtension(endExclusive);
+            var namespaceOwners = repositories.countPublishersThatClaimedNamespaceOwnership(endExclusive);
+            var extensionsByRating = repositories.countActiveExtensionsGroupedByExtensionReviewRating(endExclusive);
+            var publishersByExtensionsPublished = repositories.countActiveExtensionPublishersGroupedByExtensionsPublished(endExclusive);
+
+            statistics = new AdminStatistics();
+            statistics.setYear(year);
+            statistics.setMonth(month);
+            statistics.setExtensions(extensions);
+            statistics.setDownloads(downloads);
+            statistics.setDownloadsTotal(downloadsTotal);
+            statistics.setPublishers(publishers);
+            statistics.setAverageReviewsPerExtension(averageReviewsPerExtension);
+            statistics.setNamespaceOwners(namespaceOwners);
+            statistics.setExtensionsByRating(extensionsByRating);
+            statistics.setPublishersByExtensionsPublished(publishersByExtensionsPublished);
+
+            if(!currentYearAndMonth) {
+                // archive statistics for quicker lookup next time
+                entityManager.persist(statistics);
+            }
+        }
+
+        return statistics.toCsv();
+    }
 }

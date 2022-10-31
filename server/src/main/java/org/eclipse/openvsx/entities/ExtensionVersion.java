@@ -9,11 +9,9 @@
  ********************************************************************************/
 package org.eclipse.openvsx.entities;
 
+import java.io.Serializable;
 import java.time.LocalDateTime;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import javax.persistence.*;
@@ -26,7 +24,8 @@ import org.eclipse.openvsx.util.SemanticVersion;
 import org.eclipse.openvsx.util.TimeUtil;
 
 @Entity
-public class ExtensionVersion {
+@Table(uniqueConstraints = { @UniqueConstraint(columnNames = { "targetPlatform", "version" })})
+public class ExtensionVersion implements Serializable {
 
     public static final Comparator<ExtensionVersion> SORT_COMPARATOR =
         Comparator.<ExtensionVersion, SemanticVersion>comparing(ev -> ev.getSemanticVersion())
@@ -40,13 +39,14 @@ public class ExtensionVersion {
     @ManyToOne
     Extension extension;
 
-    @OneToOne(mappedBy = "latest", fetch = FetchType.LAZY)
-    Extension latestInverse;
-
     String version;
+
+    String targetPlatform;
 
     @Transient
     SemanticVersion semver;
+
+    boolean preRelease;
 
     boolean preview;
 
@@ -70,7 +70,7 @@ public class ExtensionVersion {
     @Convert(converter = ListOfStringConverter.class)
     List<String> categories;
 
-    @Column(length = 2048)
+    @Column(length = 16384)
     @Convert(converter = ListOfStringConverter.class)
     List<String> tags;
 
@@ -111,13 +111,13 @@ public class ExtensionVersion {
      */
     public ExtensionJson toExtensionJson() {
         var json = new ExtensionJson();
-        var extension = this.getExtension();
+        json.targetPlatform = this.getTargetPlatform();
         json.namespace = extension.getNamespace().getName();
         json.name = extension.getName();
         json.averageRating = extension.getAverageRating();
         json.downloadCount = extension.getDownloadCount();
         json.version = this.getVersion();
-        json.preview = this.isPreview();
+        json.preRelease = this.isPreRelease();
         if (this.getTimestamp() != null) {
             json.timestamp = TimeUtil.toUTCString(this.getTimestamp());
         }
@@ -201,12 +201,12 @@ public class ExtensionVersion {
 	}
 
 	public Extension getExtension() {
-		return extension;
-	}
+        return extension;
+    }
 
-	public void setExtension(Extension extension) {
-		this.extension = extension;
-	}
+    public void setExtension(Extension extension) {
+        this.extension = extension;
+    }
 
 	public String getVersion() {
 		return version;
@@ -215,7 +215,15 @@ public class ExtensionVersion {
 	public void setVersion(String version) {
 		this.version = version;
     }
-    
+
+    public String getTargetPlatform() {
+        return targetPlatform;
+    }
+
+    public void setTargetPlatform(String targetPlatform) {
+        this.targetPlatform = targetPlatform;
+    }
+
     public SemanticVersion getSemanticVersion() {
         if (semver == null) {
             var version = getVersion();
@@ -225,13 +233,21 @@ public class ExtensionVersion {
         return semver;
     }
 
-	public boolean isPreview() {
-		return preview;
+	public boolean isPreRelease() {
+		return preRelease;
 	}
 
-	public void setPreview(boolean preview) {
-		this.preview = preview;
+	public void setPreRelease(boolean preRelease) {
+		this.preRelease = preRelease;
 	}
+
+	public boolean isPreview() {
+        return preview; 
+    }
+
+    public void setPreview(boolean preview) {
+        this.preview = preview;
+    }
 
 	public LocalDateTime getTimestamp() {
 		return timestamp;
@@ -385,4 +401,52 @@ public class ExtensionVersion {
 		this.bundledExtensions = bundledExtensions;
 	}
 
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        ExtensionVersion that = (ExtensionVersion) o;
+        return id == that.id
+                && preRelease == that.preRelease
+                && preview == that.preview
+                && active == that.active
+                && Objects.equals(getId(extension), getId(that.extension)) // use id to prevent infinite recursion
+                && Objects.equals(version, that.version)
+                && Objects.equals(targetPlatform, that.targetPlatform)
+                && Objects.equals(timestamp, that.timestamp)
+                && Objects.equals(getId(publishedWith), getId(that.publishedWith)) // use id to prevent infinite recursion
+                && Objects.equals(displayName, that.displayName)
+                && Objects.equals(description, that.description)
+                && Objects.equals(engines, that.engines)
+                && Objects.equals(categories, that.categories)
+                && Objects.equals(tags, that.tags)
+                && Objects.equals(extensionKind, that.extensionKind)
+                && Objects.equals(license, that.license)
+                && Objects.equals(homepage, that.homepage)
+                && Objects.equals(repository, that.repository)
+                && Objects.equals(bugs, that.bugs)
+                && Objects.equals(markdown, that.markdown)
+                && Objects.equals(galleryColor, that.galleryColor)
+                && Objects.equals(galleryTheme, that.galleryTheme)
+                && Objects.equals(qna, that.qna)
+                && Objects.equals(dependencies, that.dependencies)
+                && Objects.equals(bundledExtensions, that.bundledExtensions);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
+                id, getId(extension), version, targetPlatform, preRelease, preview, timestamp, getId(publishedWith),
+                active, displayName, description, engines, categories, tags, extensionKind, license, homepage, repository,
+                bugs, markdown, galleryColor, galleryTheme, qna, dependencies, bundledExtensions
+        );
+    }
+
+    private Long getId(Extension extension) {
+        return Optional.ofNullable(extension).map(Extension::getId).orElse(null);
+    }
+
+    private Long getId(PersonalAccessToken token) {
+        return Optional.ofNullable(token).map(PersonalAccessToken::getId).orElse(null);
+    }
 }

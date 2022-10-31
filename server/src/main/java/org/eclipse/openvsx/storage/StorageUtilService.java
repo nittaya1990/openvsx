@@ -9,31 +9,24 @@
  ********************************************************************************/
 package org.eclipse.openvsx.storage;
 
-import static org.eclipse.openvsx.entities.FileResource.*;
-
-import java.net.URI;
-import java.net.URLConnection;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
-
-import javax.transaction.Transactional;
-
 import com.google.common.base.Strings;
-
+import com.google.common.collect.Maps;
 import org.eclipse.openvsx.entities.ExtensionVersion;
 import org.eclipse.openvsx.entities.FileResource;
 import org.eclipse.openvsx.repositories.RepositoryService;
-import org.eclipse.openvsx.search.SearchService;
+import org.eclipse.openvsx.util.TimeUtil;
 import org.eclipse.openvsx.util.UrlUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+
+import javax.transaction.Transactional;
+import java.net.URI;
+import java.util.*;
+import java.util.stream.Collectors;
+
+import static org.eclipse.openvsx.entities.FileResource.*;
 
 /**
  * Provides utility around storing file resources and acts as a composite storage
@@ -46,13 +39,16 @@ public class StorageUtilService implements IStorageService {
     RepositoryService repositories;
 
     @Autowired
-    SearchService search;
-
-    @Autowired
     GoogleCloudStorageService googleStorage;
 
     @Autowired
     AzureBlobStorageService azureStorage;
+
+    @Autowired
+    AzureDownloadCountService azureDownloadCountService;
+
+    @Autowired
+    DownloadCountService downloadCountService;
 
     /** Determines which external storage service to use in case multiple services are configured. */
     @Value("${ovsx.storage.primary-service:}")
@@ -96,8 +92,10 @@ public class StorageUtilService implements IStorageService {
     }
 
     @Override
+    @Transactional(Transactional.TxType.MANDATORY)
     public void uploadFile(FileResource resource) {
-        switch (getActiveStorageType()) {
+        var storageType = getActiveStorageType();
+        switch (storageType) {
             case STORAGE_GOOGLE:
                 googleStorage.uploadFile(resource);
                 break;
@@ -107,6 +105,8 @@ public class StorageUtilService implements IStorageService {
             default:
                 throw new RuntimeException("External storage is not available.");
         }
+
+        resource.setStorageType(storageType);
     }
 
     @Override
@@ -136,76 +136,48 @@ public class StorageUtilService implements IStorageService {
     }
 
     private String getFileUrl(String name, ExtensionVersion extVersion, String serverUrl) {
-        var extension = extVersion.getExtension();
-        var namespace = extension.getNamespace();
-        return UrlUtil.createApiUrl(serverUrl, "api", namespace.getName(), extension.getName(), extVersion.getVersion(),
-                "file", name);
+        return UrlUtil.createApiFileUrl(serverUrl, extVersion, name);
+    }
+
+    public Map<String, String> getFileUrls(ExtensionVersion extVersion, String serverUrl, String... types) {
+        var fileUrls = getFileUrls(List.of(extVersion), serverUrl, types);
+        return fileUrls.get(extVersion.getId());
     }
 
     /**
-     * Adds URLs for the given file types to a map to be used in JSON response data.
+     * Returns URLs for the given file types as a map of ExtensionVersion.id by a map of type by file URL, to be used in JSON response data.
      */
-    public void addFileUrls(ExtensionVersion extVersion, String serverUrl, Map<String, String> type2Url, String... types) {
-        var extension = extVersion.getExtension();
-        var namespace = extension.getNamespace();
-        var versionUrl = UrlUtil.createApiUrl(serverUrl, "api", namespace.getName(), extension.getName(), extVersion.getVersion());
-        var resources = repositories.findFilesByType(extVersion, Arrays.asList(types));
+    public Map<Long, Map<String, String>> getFileUrls(Collection<ExtensionVersion> extVersions, String serverUrl, String... types) {
+        var type2Url = extVersions.stream()
+                .map(ev -> new AbstractMap.SimpleEntry<Long, Map<String, String>>(ev.getId(), Maps.newLinkedHashMapWithExpectedSize(types.length)))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
+        var resources = repositories.findFilesByType(extVersions, Arrays.asList(types));
         for (var resource : resources) {
-            var fileUrl = UrlUtil.createApiUrl(versionUrl, "file", resource.getName());
-            type2Url.put(resource.getType(), fileUrl);
+            var extVersion = resource.getExtension();
+            type2Url.get(extVersion.getId()).put(resource.getType(), getFileUrl(resource.getName(), extVersion, serverUrl));
         }
+
+        return type2Url;
     }
 
-    public Map<String, String> getWebResourceUrls(ExtensionVersion extVersion, String serverUrl) {
-        var name2Url = new HashMap<String, String>();
-        var extension = extVersion.getExtension();
-        var namespace = extension.getNamespace();
-        var versionUrl = UrlUtil.createApiUrl(serverUrl, "api", namespace.getName(), extension.getName(), extVersion.getVersion());
-        var resources = repositories.findFilesByType(extVersion, Arrays.asList(WEB_RESOURCE));
-        if (resources != null) {
-            for (var resource : resources) {
-                var fileUrl = UrlUtil.createApiUrl(versionUrl, "file", resource.getName());
-                name2Url.put(resource.getName(), fileUrl);
-            }
+    public void increaseDownloadCount(ExtensionVersion extVersion, FileResource resource) {
+        if(azureDownloadCountService.isEnabled()) {
+            // don't count downloads twice
+            return;
         }
-        return name2Url;
-    }
 
-    /**
-     * Register a package file download by increasing its download count.
-     */
-    @Transactional
-    public void increaseDownloadCount(ExtensionVersion extVersion) {
-        var extension = extVersion.getExtension();
-        extension.setDownloadCount(extension.getDownloadCount() + 1);
-        search.updateSearchEntry(extension);
+        downloadCountService.increaseDownloadCount(extVersion, resource, List.of(TimeUtil.getCurrentUTC()));
     }
 
     public HttpHeaders getFileResponseHeaders(String fileName) {
         var headers = new HttpHeaders();
-        headers.setContentType(getFileType(fileName));
+        headers.setContentType(StorageUtil.getFileType(fileName));
         if (fileName.endsWith(".vsix")) {
             headers.add("Content-Disposition", "attachment; filename=\"" + fileName + "\"");
         } else {
-            headers.setCacheControl(getCacheControl(fileName));
+            headers.setCacheControl(StorageUtil.getCacheControl(fileName));
         }
         return headers;
     }
-
-    public MediaType getFileType(String fileName) {
-        if (fileName.endsWith(".vsix"))
-            return MediaType.APPLICATION_OCTET_STREAM;
-        if (fileName.endsWith(".json"))
-            return MediaType.APPLICATION_JSON;
-        var contentType = URLConnection.guessContentTypeFromName(fileName);
-        if (contentType != null)
-            return MediaType.parseMediaType(contentType);
-        return MediaType.TEXT_PLAIN;
-    }
-
-    public CacheControl getCacheControl(String fileName) {
-        // Files are requested with a version string in the URL, so their content cannot change
-        return CacheControl.maxAge(30, TimeUnit.DAYS).cachePublic();
-    }
-    
 }

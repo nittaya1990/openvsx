@@ -15,7 +15,7 @@ import org.eclipse.openvsx.json.QueryParamJson;
 import org.eclipse.openvsx.json.QueryResultJson;
 import org.eclipse.openvsx.json.ReviewListJson;
 import org.eclipse.openvsx.json.SearchResultJson;
-import org.eclipse.openvsx.search.SearchService;
+import org.eclipse.openvsx.search.ISearchService;
 import org.springframework.http.ResponseEntity;
 
 /**
@@ -25,15 +25,15 @@ public interface IExtensionRegistry {
 
     NamespaceJson getNamespace(String namespace);
 
-    ExtensionJson getExtension(String namespace, String extension);
+    ExtensionJson getExtension(String namespace, String extensionName, String targetPlatform);
 
-    ExtensionJson getExtension(String namespace, String extension, String version);
+    ExtensionJson getExtension(String namespace, String extensionName, String targetPlatform, String version);
 
-    ResponseEntity<byte[]> getFile(String namespace, String extension, String version, String fileName);
+    ResponseEntity<byte[]> getFile(String namespace, String extensionName, String targetPlatform, String version, String fileName);
 
     ReviewListJson getReviews(String namespace, String extension);
 
-    SearchResultJson search(SearchService.Options options);
+    SearchResultJson search(ISearchService.Options options);
 
     QueryResultJson query(QueryParamJson param);
 

@@ -12,8 +12,7 @@ package org.eclipse.openvsx.adapter;
 import java.util.List;
 
 // Keep interfaces in sync with
-// https://github.com/microsoft/vscode/blob/e7d7e9a9348e6a8cc8c03f877d39cb72e5dfb1ff/src/vs/platform/extensionManagement/common/extensionGalleryService.ts#L28-L67
-
+// https://github.com/microsoft/vscode/blob/de0724b414e2f95f6cc484b03bccbc96686c2cfd/src/vs/platform/extensionManagement/common/extensionGalleryService.ts#L34-L81
 public class ExtensionQueryResult {
 
     public List<ResultItem> results;
@@ -45,6 +44,8 @@ public class ExtensionQueryResult {
         public String displayName;
         public String publisherId;
         public String publisherName;
+        public String domain;
+        public Boolean isDomainVerified;
     }
 
     public static class ExtensionVersion {
@@ -97,6 +98,7 @@ public class ExtensionQueryResult {
         public static final String PROP_BRANDING_COLOR = "Microsoft.VisualStudio.Services.Branding.Color";
         public static final String PROP_BRANDING_THEME = "Microsoft.VisualStudio.Services.Branding.Theme";
         public static final String PROP_WEB_EXTENSION = "Microsoft.VisualStudio.Code.WebExtension";
+        public static final String PROP_PRE_RELEASE = "Microsoft.VisualStudio.Code.PreRelease";
 
         public String key;
         public String value;

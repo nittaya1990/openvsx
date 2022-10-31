@@ -9,24 +9,23 @@
  ********************************************************************************/
 package org.eclipse.openvsx.entities;
 
+import java.io.Serializable;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.GeneratedValue;
-import javax.persistence.Id;
-import javax.persistence.ManyToOne;
-import javax.persistence.OneToMany;
-import javax.persistence.OneToOne;
-import javax.persistence.Table;
-import javax.persistence.UniqueConstraint;
+import javax.persistence.*;
+import javax.transaction.Transactional;
 
 import org.eclipse.openvsx.search.ExtensionSearch;
 
 @Entity
-@Table(uniqueConstraints = @UniqueConstraint(columnNames = { "publicId" }))
-public class Extension {
+@Table(uniqueConstraints = {
+        @UniqueConstraint(columnNames = { "publicId" }),
+        @UniqueConstraint(columnNames = { "namespace_id", "name" })
+})
+public class Extension implements Serializable {
 
     @Id
     @GeneratedValue
@@ -43,23 +42,20 @@ public class Extension {
     @OneToMany(mappedBy = "extension")
     List<ExtensionVersion> versions;
 
-    @OneToOne
-    ExtensionVersion latest;
-
-    @OneToOne
-    ExtensionVersion preview;
-
     boolean active;
 
     Double averageRating;
 
     int downloadCount;
 
+    LocalDateTime publishedDate;
+
+    LocalDateTime lastUpdatedDate;
 
     /**
      * Convert to a search entity for Elasticsearch.
      */
-    public ExtensionSearch toSearch() {
+    public ExtensionSearch toSearch(ExtensionVersion latest) {
         var search = new ExtensionSearch();
         search.id = this.getId();
         search.name = this.getName();
@@ -67,12 +63,17 @@ public class Extension {
         search.extensionId = search.namespace + "." + search.name;
         search.averageRating = this.getAverageRating();
         search.downloadCount = this.getDownloadCount();
-        var extVer = this.getLatest();
-        search.displayName = extVer.getDisplayName();
-        search.description = extVer.getDescription();
-        search.timestamp = extVer.getTimestamp().toEpochSecond(ZoneOffset.UTC);
-        search.categories = extVer.getCategories();
-        search.tags = extVer.getTags();
+        search.targetPlatforms = this.getVersions().stream()
+                .map(ExtensionVersion::getTargetPlatform)
+                .distinct()
+                .collect(Collectors.toList());
+
+        search.displayName = latest.getDisplayName();
+        search.description = latest.getDescription();
+        search.timestamp = latest.getTimestamp().toEpochSecond(ZoneOffset.UTC);
+        search.categories = latest.getCategories();
+        search.tags = latest.getTags();
+
         return search;
     }
 
@@ -103,29 +104,9 @@ public class Extension {
 	public Namespace getNamespace() {
 		return namespace;
     }
-    
-    public List<ExtensionVersion> getVersions() {
-        return versions;
-    }
 
 	public void setNamespace(Namespace namespace) {
 		this.namespace = namespace;
-	}
-
-	public ExtensionVersion getLatest() {
-		return latest;
-	}
-
-	public void setLatest(ExtensionVersion latest) {
-		this.latest = latest;
-	}
-
-	public ExtensionVersion getPreview() {
-		return preview;
-	}
-
-	public void setPreview(ExtensionVersion preview) {
-		this.preview = preview;
 	}
 
     public boolean isActive() {
@@ -152,4 +133,49 @@ public class Extension {
         this.downloadCount = downloadCount;
     }
 
+    public LocalDateTime getPublishedDate() {
+        return publishedDate;
+    }
+
+    public void setPublishedDate(LocalDateTime publishedDate) {
+        this.publishedDate = publishedDate;
+    }
+
+    public LocalDateTime getLastUpdatedDate() {
+        return lastUpdatedDate;
+    }
+
+    public void setLastUpdatedDate(LocalDateTime lastUpdatedDate) {
+        this.lastUpdatedDate = lastUpdatedDate;
+    }
+
+    public List<ExtensionVersion> getVersions() {
+        if(versions == null) {
+            versions = new ArrayList<>();
+        }
+
+        return versions;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        Extension extension = (Extension) o;
+        return id == extension.id
+                && active == extension.active
+                && downloadCount == extension.downloadCount
+                && Objects.equals(publicId, extension.publicId)
+                && Objects.equals(name, extension.name)
+                && Objects.equals(namespace, extension.namespace)
+                && Objects.equals(versions, extension.versions)
+                && Objects.equals(averageRating, extension.averageRating)
+                && Objects.equals(publishedDate, extension.publishedDate)
+                && Objects.equals(lastUpdatedDate, extension.lastUpdatedDate);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, publicId, name, namespace, versions, active, averageRating, downloadCount, publishedDate, lastUpdatedDate);
+    }
 }

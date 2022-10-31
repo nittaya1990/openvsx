@@ -4,8 +4,9 @@ image:
 ports:
 # Web UI (static resources)
 - port: 3000
-# Server (API)
+# Server (API, must be public for CORS)
 - port: 8080
+  visibility: public
   onOpen: ignore
 # Test report
 - port: 8081
@@ -36,20 +37,20 @@ tasks:
     if [[ $NPM_TOKEN ]]; then echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc; fi
     # Start Elasticsearch as background process
     $ES_HOME/bin/elasticsearch -d -p $ES_HOME/pid -Ediscovery.type=single-node -Expack.ml.enabled=false
-    gp await-port 9200
+    gp ports await 9200
     # Start the server application
     cd server
     ./scripts/generate-properties.sh
     ./gradlew runServer
 - name: WebUI
   command: |
-    gp await-port 8080
+    gp ports await 8080
     # Start Express for serving frontend resources
     cd webui
     yarn start:default
 - name: Publisher
   command: |
-    gp await-port 8080
+    gp ports await 8080
     # Use the CLI to publish some test extensions to the running server
     export OVSX_REGISTRY_URL=http://localhost:8080
     export OVSX_PAT=super_token
@@ -57,7 +58,6 @@ tasks:
     for pub in $PUBLISHERS; do cli/lib/ovsx create-namespace $pub; done
     find server/build/test-extensions-builtin -name '*.vsix' -exec cli/lib/ovsx publish '{}' \;
     find server/build/test-extensions -name '*.vsix' -exec cli/lib/ovsx publish '{}' \;
-    find server/build/test-extensions-web -name '*.vsix' -exec cli/lib/ovsx publish '{}' \;
 
 vscode:
   extensions:

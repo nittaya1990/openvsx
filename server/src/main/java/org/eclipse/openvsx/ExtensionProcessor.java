@@ -14,8 +14,10 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
@@ -32,7 +34,10 @@ import org.eclipse.openvsx.entities.FileResource;
 import org.eclipse.openvsx.util.ArchiveUtil;
 import org.eclipse.openvsx.util.ErrorResultException;
 import org.eclipse.openvsx.util.LicenseDetection;
+import org.eclipse.openvsx.util.TargetPlatform;
 import org.elasticsearch.common.Strings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.util.Pair;
 import org.springframework.http.HttpStatus;
 
@@ -51,6 +56,8 @@ public class ExtensionProcessor implements AutoCloseable {
     private static final Pattern LICENSE_PATTERN = Pattern.compile("SEE( (?<license>\\S+))? LICENSE IN (?<file>\\S+)");
 
     private static final String WEB_EXTENSION_TAG = "__web_extension";
+
+    protected final Logger logger = LoggerFactory.getLogger(ExtensionProcessor.class);
 
     private final InputStream inputStream;
     private byte[] content;
@@ -212,18 +219,26 @@ public class ExtensionProcessor implements AutoCloseable {
         return asStringList(galleryFlags.asText(), " ").contains("Preview");
     }
 
+    public boolean isPreRelease() {
+        loadVsixManifest();
+        var preReleaseNode = findByIdInArray(vsixManifest.path("Metadata").path("Properties").path("Property"), "Microsoft.VisualStudio.Code.PreRelease");
+        return preReleaseNode.path("Value").asBoolean(false);
+    }
+
     public ExtensionVersion getMetadata() {
         loadPackageJson();
         loadVsixManifest();
         var extension = new ExtensionVersion();
-        extension.setVersion(vsixManifest.path("Metadata").path("Identity").path("Version").asText());
+        extension.setVersion(getVersion());
+        extension.setTargetPlatform(getTargetPlatform());
         extension.setPreview(isPreview());
+        extension.setPreRelease(isPreRelease());
         extension.setDisplayName(vsixManifest.path("Metadata").path("DisplayName").asText());
         extension.setDescription(vsixManifest.path("Metadata").path("Description").path("").asText());
         extension.setEngines(getEngines(packageJson.path("engines")));
         extension.setCategories(asStringList(vsixManifest.path("Metadata").path("Categories").asText(), ","));
         extension.setExtensionKind(getExtensionKinds());
-        extension.setTags(asStringList(vsixManifest.path("Metadata").path("Tags").asText(), ","));
+        extension.setTags(getTags());
         extension.setLicense(packageJson.path("license").textValue());
         extension.setHomepage(getHomepage());
         extension.setRepository(getRepository());
@@ -234,6 +249,29 @@ public class ExtensionProcessor implements AutoCloseable {
         extension.setQna(packageJson.path("qna").textValue());
 
         return extension;
+    }
+
+    private String getVersion() {
+        return vsixManifest.path("Metadata").path("Identity").path("Version").asText();
+    }
+
+    private String getTargetPlatform() {
+        var targetPlatform = vsixManifest.path("Metadata").path("Identity").path("TargetPlatform").asText();
+        if(targetPlatform.isEmpty()) {
+            targetPlatform = TargetPlatform.NAME_UNIVERSAL;
+        }
+
+        return targetPlatform;
+    }
+
+    private List<String> getTags() {
+        var tags = vsixManifest.path("Metadata").path("Tags").asText();
+        return asStringList(tags, ",").stream()
+                .collect(Collectors.groupingBy(String::toLowerCase))
+                .entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(e -> e.getValue().get(0))
+                .collect(Collectors.toList());
     }
 
     private List<String> asStringList(String value, String sep){
@@ -257,116 +295,149 @@ public class ExtensionProcessor implements AutoCloseable {
         return null;
     }
 
-    private boolean isWebExtensionKind(ExtensionVersion extension) {
-        return extension.getTags().contains(WEB_EXTENSION_TAG);
+    public List<FileResource> getResources(ExtensionVersion extVersion) {
+        return getResources(extVersion, Collections.emptyList());
     }
 
-    public List<FileResource> getResources(ExtensionVersion extension) {
+    public List<FileResource> getResources(ExtensionVersion extVersion, List<String> excludes) {
         var resources = new ArrayList<FileResource>();
-        var binary = getBinary(extension);
-        if (binary != null)
-            resources.add(binary);
-        var manifest = getManifest(extension);
-        if (manifest != null)
-            resources.add(manifest);
-        var readme = getReadme(extension);
-        if (readme != null)
-            resources.add(readme);
-        var changelog = getChangelog(extension);
-        if (changelog != null)
-            resources.add(changelog);
-        var license = getLicense(extension);
-        if (license != null)
-            resources.add(license);
-        var icon = getIcon(extension);
-        if (icon != null)
-            resources.add(icon);
-        if (isWebExtensionKind(extension))
-            resources.addAll(getWebResources(extension));
+        if(!excludes.contains(FileResource.RESOURCE)) {
+            resources.addAll(getAllResources(extVersion).collect(Collectors.toList()));
+        }
+        if(!excludes.contains(FileResource.DOWNLOAD)) {
+            var binary = getBinary(extVersion);
+            if (binary != null)
+                resources.add(binary);
+        }
+        if(!excludes.contains(FileResource.MANIFEST)) {
+            var manifest = getManifest(extVersion);
+            if (manifest != null)
+                resources.add(manifest);
+        }
+        if(!excludes.contains(FileResource.README)) {
+            var readme = getReadme(extVersion);
+            if (readme != null)
+                resources.add(readme);
+        }
+        if(!excludes.contains(FileResource.CHANGELOG)) {
+            var changelog = getChangelog(extVersion);
+            if (changelog != null)
+                resources.add(changelog);
+        }
+        if(!excludes.contains(FileResource.LICENSE)) {
+            var license = getLicense(extVersion);
+            if (license != null)
+                resources.add(license);
+        }
+        if(!excludes.contains(FileResource.ICON)) {
+            var icon = getIcon(extVersion);
+            if (icon != null)
+                resources.add(icon);
+        }
+
         return resources;
     }
 
-    protected List<FileResource> getWebResources(ExtensionVersion extension) {
+    public void processEachResource(ExtensionVersion extVersion, Consumer<FileResource> processor) {
+        getAllResources(extVersion).forEach(processor);
+    }
+
+    protected Stream<FileResource> getAllResources(ExtensionVersion extVersion) {
         readInputStream();
-        var namePrefix = "extension/";
         return zipFile.stream()
-                .filter(zipEntry -> zipEntry.getName().startsWith(namePrefix))
                 .map(zipEntry -> {
-                    var bytes = ArchiveUtil.readEntry(zipFile, zipEntry);
+                    byte[] bytes;
+                    try {
+                        bytes = ArchiveUtil.readEntry(zipFile, zipEntry);
+                    } catch(ErrorResultException exc) {
+                        logger.warn("Failed to read entry", exc);
+                        bytes = null;
+                    }
                     if (bytes == null) {
                         return null;
                     }
-                    var webResource = new FileResource();
-                    webResource.setExtension(extension);
-                    webResource.setName(zipEntry.getName());
-                    webResource.setType(FileResource.WEB_RESOURCE);
-                    webResource.setContent(bytes);
-                    return webResource;
+                    var resource = new FileResource();
+                    resource.setExtension(extVersion);
+                    resource.setName(zipEntry.getName());
+                    resource.setType(FileResource.RESOURCE);
+                    resource.setContent(bytes);
+                    return resource;
                 })
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
+                .filter(Objects::nonNull);
     }
 
-    protected FileResource getBinary(ExtensionVersion extension) {
+    public FileResource getBinary(ExtensionVersion extVersion) {
         var binary = new FileResource();
-        binary.setExtension(extension);
+        binary.setExtension(extVersion);
+        binary.setName(getBinaryName());
         binary.setType(FileResource.DOWNLOAD);
         binary.setContent(content);
         return binary;
     }
 
-    protected FileResource getManifest(ExtensionVersion extension) {
+    private String getBinaryName() {
+        loadVsixManifest();
+        var resourceName = getNamespace() + "." + getExtensionName() + "-" + getVersion();
+        if(!TargetPlatform.isUniversal(getTargetPlatform())) {
+            resourceName += "@" + getTargetPlatform();
+        }
+
+        resourceName += ".vsix";
+        return resourceName;
+    }
+
+    protected FileResource getManifest(ExtensionVersion extVersion) {
         readInputStream();
         var bytes = ArchiveUtil.readEntry(zipFile, PACKAGE_JSON);
         if (bytes == null) {
             return null;
         }
         var manifest = new FileResource();
-        manifest.setExtension(extension);
+        manifest.setExtension(extVersion);
         manifest.setName("package.json");
         manifest.setType(FileResource.MANIFEST);
         manifest.setContent(bytes);
         return manifest;
     }
 
-    protected FileResource getReadme(ExtensionVersion extension) {
+    protected FileResource getReadme(ExtensionVersion extVersion) {
         readInputStream();
         var result = readFromAlternateNames(README);
         if (result == null) {
             return null;
         }
         var readme = new FileResource();
-        readme.setExtension(extension);
+        readme.setExtension(extVersion);
         readme.setName(result.getSecond());
         readme.setType(FileResource.README);
         readme.setContent(result.getFirst());
         return readme;
     }
 
-    public FileResource getChangelog(ExtensionVersion extension) {
+    public FileResource getChangelog(ExtensionVersion extVersion) {
         readInputStream();
         var result = readFromAlternateNames(CHANGELOG);
         if (result == null) {
             return null;
         }
         var changelog = new FileResource();
-        changelog.setExtension(extension);
+        changelog.setExtension(extVersion);
         changelog.setName(result.getSecond());
         changelog.setType(FileResource.CHANGELOG);
         changelog.setContent(result.getFirst());
         return changelog;
     }
 
-    protected FileResource getLicense(ExtensionVersion extension) {
+    public FileResource getLicense(ExtensionVersion extVersion) {
         readInputStream();
         var license = new FileResource();
-        license.setExtension(extension);
+        license.setExtension(extVersion);
         license.setType(FileResource.LICENSE);
         // Parse specifications in the form "SEE MIT LICENSE IN LICENSE.txt"
-        if (!Strings.isNullOrEmpty(extension.getLicense())) {
-            var matcher = LICENSE_PATTERN.matcher(extension.getLicense());
+        if (!Strings.isNullOrEmpty(extVersion.getLicense())) {
+            var matcher = LICENSE_PATTERN.matcher(extVersion.getLicense());
             if (matcher.find()) {
-                extension.setLicense(matcher.group("license"));
+                extVersion.setLicense(matcher.group("license"));
                 var fileName = matcher.group("file");
                 var bytes = ArchiveUtil.readEntry(zipFile, "extension/" + fileName);
                 if (bytes != null) {
@@ -374,7 +445,7 @@ public class ExtensionProcessor implements AutoCloseable {
                     var lastSegment = fileName.substring(lastSegmentIndex + 1);
                     license.setName(lastSegment);
                     license.setContent(bytes);
-                    detectLicense(bytes, extension);
+                    detectLicense(bytes, extVersion);
                     return license;
                 }
             }
@@ -386,14 +457,14 @@ public class ExtensionProcessor implements AutoCloseable {
         }
         license.setName(result.getSecond());
         license.setContent(result.getFirst());
-        detectLicense(result.getFirst(), extension);
+        detectLicense(result.getFirst(), extVersion);
         return license;
     }
 
-    private void detectLicense(byte[] content, ExtensionVersion extension) {
-        if (Strings.isNullOrEmpty(extension.getLicense())) {
+    private void detectLicense(byte[] content, ExtensionVersion extVersion) {
+        if (Strings.isNullOrEmpty(extVersion.getLicense())) {
             var detection = new LicenseDetection();
-            extension.setLicense(detection.detectLicense(content));
+            extVersion.setLicense(detection.detectLicense(content));
         }
     }
 
@@ -410,7 +481,7 @@ public class ExtensionProcessor implements AutoCloseable {
         return null;
     }
 
-    protected FileResource getIcon(ExtensionVersion extension) {
+    protected FileResource getIcon(ExtensionVersion extVersion) {
         loadPackageJson();
         var iconPath = packageJson.get("icon");
         if (iconPath == null || !iconPath.isTextual())
@@ -420,7 +491,7 @@ public class ExtensionProcessor implements AutoCloseable {
         if (bytes == null)
             return null;
         var icon = new FileResource();
-        icon.setExtension(extension);
+        icon.setExtension(extVersion);
         var fileNameIndex = iconPathStr.lastIndexOf('/');
         if (fileNameIndex >= 0)
             icon.setName(iconPathStr.substring(fileNameIndex + 1));

@@ -39,9 +39,9 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
             .authorizeRequests()
                 .antMatchers("/*", "/login/**", "/oauth2/**", "/user", "/user/auth-error", "/logout", "/actuator/health/**")
                     .permitAll()
-                .antMatchers("/api/*/*/review", "/api/*/*/review/delete")
+                .antMatchers("/api/*/*/review", "/api/*/*/review/delete", "/api/user/publish", "/api/user/namespace/create")
                     .authenticated()
-                .antMatchers("/api/**", "/vscode/**", "/documents/**")
+                .antMatchers("/api/**", "/vscode/**", "/documents/**", "/admin/report")
                     .permitAll()
                 .antMatchers("/admin/**")
                     .hasAuthority("ROLE_ADMIN")
@@ -76,7 +76,7 @@ public class SecurityConfig extends WebSecurityConfigurerAdapter {
     @Override
     public void configure(WebSecurity web) throws Exception {
         // Ignore resources required by Swagger API documentation
-        web.ignoring().antMatchers("/v2/api-docs", "/swagger-resources/**", "/swagger-ui/**", "/webjars/**");
+        web.ignoring().antMatchers("/v3/api-docs/**", "/swagger-resources/**", "/swagger-ui/**", "/webjars/**");
     }
 
 }

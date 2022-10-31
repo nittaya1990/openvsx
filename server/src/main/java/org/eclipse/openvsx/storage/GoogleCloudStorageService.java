@@ -9,32 +9,24 @@
  ********************************************************************************/
 package org.eclipse.openvsx.storage;
 
-import java.net.URI;
-
-import javax.transaction.Transactional;
-import javax.transaction.Transactional.TxType;
-
 import com.google.cloud.storage.BlobId;
 import com.google.cloud.storage.BlobInfo;
 import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
-
-import org.eclipse.openvsx.entities.ExtensionVersion;
+import org.apache.commons.lang3.ArrayUtils;
 import org.eclipse.openvsx.entities.FileResource;
+import org.eclipse.openvsx.util.TargetPlatform;
 import org.eclipse.openvsx.util.UrlUtil;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
+import java.net.URI;
 
 @Component
 public class GoogleCloudStorageService implements IStorageService {
 
     private static final String BASE_URL = "https://storage.googleapis.com/";
-
-    @Autowired
-    StorageUtilService storageUtil;
 
     @Value("${ovsx.storage.gcp.project-id:}")
     String projectId;
@@ -65,25 +57,23 @@ public class GoogleCloudStorageService implements IStorageService {
     }
 
     @Override
-    @Transactional(TxType.MANDATORY)
     public void uploadFile(FileResource resource) {
-        var objectId = getObjectId(resource.getName(), resource.getExtension());
+        var objectId = getObjectId(resource);
         if (Strings.isNullOrEmpty(bucketId)) {
             throw new IllegalStateException("Cannot upload file "
                     + objectId + ": missing Google bucket id");
         }
 
         uploadFile(resource.getContent(), resource.getName(), objectId);
-        resource.setStorageType(FileResource.STORAGE_GOOGLE);
     }
 
     protected void uploadFile(byte[] content, String fileName, String objectId) {
         var blobInfoBuilder = BlobInfo.newBuilder(BlobId.of(bucketId, objectId))
-                .setContentType(storageUtil.getFileType(fileName).toString());
+                .setContentType(StorageUtil.getFileType(fileName).toString());
         if (fileName.endsWith(".vsix")) {
             blobInfoBuilder.setContentDisposition("attachment; filename=\"" + fileName + "\"");
         } else {
-            var cacheControl = storageUtil.getCacheControl(fileName);
+            var cacheControl = StorageUtil.getCacheControl(fileName);
             blobInfoBuilder.setCacheControl(cacheControl.getHeaderValue());
         }
         getStorage().create(blobInfoBuilder.build(), content);
@@ -91,7 +81,7 @@ public class GoogleCloudStorageService implements IStorageService {
 
     @Override
     public void removeFile(FileResource resource) {
-        var objectId = getObjectId(resource.getName(), resource.getExtension());
+        var objectId = getObjectId(resource);
         if (Strings.isNullOrEmpty(bucketId)) {
             throw new IllegalStateException("Cannot remove file "
                     + objectId + ": missing Google bucket id");
@@ -105,21 +95,21 @@ public class GoogleCloudStorageService implements IStorageService {
             throw new IllegalStateException("Cannot determine location of file "
                     + resource.getName() + ": missing Google bucket id");
         }
+        return URI.create(BASE_URL + bucketId + "/" + getObjectId(resource));
+    }
+
+    protected String getObjectId(FileResource resource) {
         var extVersion = resource.getExtension();
         var extension = extVersion.getExtension();
         var namespace = extension.getNamespace();
-        return URI.create(UrlUtil.createApiUrl(BASE_URL, bucketId, namespace.getName(),
-                extension.getName(), extVersion.getVersion(), resource.getName()));
-    }
+        var segments = new String[]{namespace.getName(), extension.getName()};
+        if(!TargetPlatform.isUniversal(extVersion)) {
+			segments = ArrayUtils.add(segments, extVersion.getTargetPlatform());
+        }
 
-    protected String getObjectId(String name, ExtensionVersion extVersion) {
-        Preconditions.checkNotNull(name);
-        var extension = extVersion.getExtension();
-        var namespace = extension.getNamespace();
-        return namespace.getName()
-                + "/" + extension.getName()
-                + "/" + extVersion.getVersion()
-                + "/" + name;
+		segments = ArrayUtils.add(segments, extVersion.getVersion());
+        segments = ArrayUtils.addAll(segments, resource.getName().split("/"));
+        return UrlUtil.createApiUrl("", segments).substring(1); // remove first '/'
     }
 
 }

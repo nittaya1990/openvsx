@@ -9,10 +9,16 @@
  ********************************************************************************/
 package org.eclipse.openvsx.util;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
-public class SemanticVersion implements Comparable<SemanticVersion> {
+public class SemanticVersion implements Comparable<SemanticVersion>, Serializable {
+
+    // source: https://semver.org/, search for: https://regex101.com/r/vkijKf/1/
+    // has been modified to only use non-capturing groups (?:.*), so that it can be used as a URI template regex
+    public static final String VERSION_PATH_PARAM_REGEX = "(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)(?:-(?:(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+(?:[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?";
 
     private final String original;
     private final List<String> parts = new ArrayList<>();
@@ -37,27 +43,56 @@ public class SemanticVersion implements Comparable<SemanticVersion> {
         }
     }
 
+    public int getMajor() {
+        return getNumberPart(0);
+    }
+
+    public int getMinor() {
+        return getNumberPart(1);
+    }
+
+    private int getNumberPart(int index) {
+        if(index >= parts.size()) {
+            return 0;
+        }
+
+        var part = parts.get(index);
+        return isNumber(part) ? Integer.parseInt(part) : 0;
+    }
+
+    private boolean isNumber(String part) {
+        var isNumber = false;
+        for(var i = 0; i < part.length(); i++) {
+            isNumber = Character.isDigit(part.charAt(i));
+            if(!isNumber) {
+                break;
+            }
+        }
+
+        return isNumber;
+    }
+
     @Override
-    public boolean equals(Object obj) {
-        if (!(obj instanceof SemanticVersion))
-            return false;
-        var other = (SemanticVersion) obj;
-        return this.parts.equals(other.parts);
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        SemanticVersion that = (SemanticVersion) o;
+        return Objects.equals(parts, that.parts);
     }
 
     @Override
     public int hashCode() {
-        return parts.hashCode();
+        return Objects.hash(parts);
     }
 
-	@Override
+    @Override
 	public int compareTo(SemanticVersion other) {
         int minSize = Math.min(this.parts.size(), other.parts.size());
         for (int i = 0; i < minSize; i++) {
             String left = this.parts.get(i);
             String right = other.parts.get(i);
-            boolean leftIsNumber = !left.isEmpty() && Character.isDigit(left.charAt(0));
-            boolean rightIsNumber = !right.isEmpty() && Character.isDigit(right.charAt(0));
+            boolean leftIsNumber = isNumber(left);
+            boolean rightIsNumber = isNumber(right);
             if (!leftIsNumber && !rightIsNumber)
                 // Regard versions as equal in terms of sorting if they differ only in their suffix
                 return 0;

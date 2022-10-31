@@ -16,13 +16,15 @@ import GitHubIcon from '@material-ui/icons/GitHub';
 import BugReportIcon from '@material-ui/icons/BugReport';
 import QuestionAnswerIcon from '@material-ui/icons/QuestionAnswer';
 import { MainContext } from '../../context';
-import { addQuery, createRoute } from '../../utils';
+import { addQuery, createRoute, getTargetPlatformDisplayName } from '../../utils';
 import { DelayedLoadIndicator } from '../../components/delayed-load-indicator';
 import { SanitizedMarkdown } from '../../components/sanitized-markdown';
 import { Timestamp } from '../../components/timestamp';
 import { Extension, ExtensionReference, VERSION_ALIASES } from '../../extension-registry-types';
 import { ExtensionListRoutes } from '../extension-list/extension-list-container';
-import { ExtensionDetailRoutes } from './extension-detail';
+import { ExtensionDetailComponent, ExtensionDetailRoutes } from './extension-detail';
+import { ExtensionDetailDownloadsMenu } from './extension-detail-downloads-menu';
+import { UrlString } from '../..';
 
 const overviewStyles = (theme: Theme) => createStyles({
     overview: {
@@ -77,7 +79,7 @@ const overviewStyles = (theme: Theme) => createStyles({
         color: theme.palette.primary.dark,
         fontWeight: theme.typography.fontWeightBold
     },
-    previewFlag: {
+    preReleaseFlag: {
         color: theme.palette.primary.dark,
         fontStyle: 'italic',
         marginLeft: theme.spacing(2),
@@ -103,6 +105,8 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
     static contextType = MainContext;
     declare context: MainContext;
 
+    protected abortController = new AbortController();
+
     constructor(props: ExtensionDetailOverview.Props) {
         super(props);
         this.state = { loading: true };
@@ -110,6 +114,10 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
 
     componentDidMount(): void {
         this.updateReadme();
+    }
+
+    componentWillUnmount(): void {
+        this.abortController.abort();
     }
 
     componentDidUpdate(prevProps: ExtensionDetailOverview.Props) {
@@ -124,7 +132,7 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
     protected async updateReadme(): Promise<void> {
         if (this.props.extension.files.readme) {
             try {
-                const readme = await this.context.service.getExtensionReadme(this.props.extension);
+                const readme = await this.context.service.getExtensionReadme(this.abortController, this.props.extension);
                 this.setState({ readme, loading: false });
             } catch (err) {
                 this.context.handleError(err);
@@ -176,6 +184,16 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
                             : null
                         }
                     </Box>
+                    {
+                        extension.downloads ?
+                        <Box className={classes.resourcesGroup}>
+                            <Box>
+                                <Typography variant='h6'>Works With</Typography>
+                                {this.renderWorksWithList(extension.downloads)}
+                            </Box>
+                        </Box>
+                        : null
+                    }
                     <Box className={classes.resourcesGroup}>
                         <Box>
                             <Typography variant='h6'>Resources</Typography>
@@ -183,11 +201,17 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
                             {this.renderResourceLink('Repository', extension.repository)}
                             {this.renderResourceLink('Bugs', extension.bugs)}
                             {this.renderResourceLink('Q\'n\'A', extension.qna)}
-                            <Button variant='contained' color='secondary'
-                                href={extension.files.download}
-                                className={classes.downloadButton} >
-                                Download
-                            </Button>
+                            {
+                                extension.downloads && Object.keys(extension.downloads).length > 1 ?
+                                <ExtensionDetailDownloadsMenu downloads={extension.downloads}/>
+                                : extension.downloads && Object.keys(extension.downloads).length == 1 ?
+                                <Button variant='contained' color='secondary'
+                                    href={extension.downloads[Object.keys(extension.downloads)[0]]}
+                                    className={classes.downloadButton}>
+                                    Download
+                                </Button>
+                                : null
+                            }
                         </Box>
                         {
                             extension.bundledExtensions !== undefined && extension.bundledExtensions.length > 0 ?
@@ -236,8 +260,8 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
                 </NativeSelect>
             }
             {
-                extension.preview ?
-                    <span className={classes.previewFlag}>(preview version)</span>
+                extension.preRelease ?
+                    <span className={classes.preReleaseFlag}>(pre-release version)</span>
                     : ''
             }
             {
@@ -251,15 +275,18 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
     }
 
     protected renderAliasesSection(otherAliases: string[]): React.ReactNode {
-        const { classes, extension } = this.props;
+        const { classes, extension, params } = this.props;
         const aliasButtons = otherAliases.length ?
             otherAliases.map(alias => {
-                let route: string;
-                if (alias === 'latest') {
-                    route = createRoute([ExtensionDetailRoutes.ROOT, extension.namespace, extension.name]);
-                } else {
-                    route = createRoute([ExtensionDetailRoutes.ROOT, extension.namespace, extension.name, alias]);
+                const arr = [ExtensionDetailRoutes.ROOT, extension.namespace, extension.name];
+                if (params.target) {
+                    arr.push(params.target);
                 }
+                if (alias !== 'latest') {
+                    arr.push(alias);
+                }
+
+                const route = createRoute(arr);
                 return <Button
                     className={classes.tagButton}
                     size='small'
@@ -279,7 +306,7 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
             }
             {
                 aliasButtons ? <>
-                    Switch to {aliasButtons}
+                    {extension.versionAlias.length > 0 ? ' ' : ''}Switch to {aliasButtons}
                 </> : ''
             }
         </React.Fragment>;
@@ -309,6 +336,13 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
                     </Button>)
             }
         </React.Fragment>;
+    }
+
+    protected renderWorksWithList(downloads: {[targetPlatform: string]: UrlString}): React.ReactNode {
+        return Object.keys(downloads).map((targetPlatform, index) => {
+            const displayName = getTargetPlatformDisplayName(targetPlatform);
+            return displayName ? <span key={targetPlatform}>{index > 0 ? ', ' : ''}{displayName}</span> : null;
+        });
     }
 
     protected renderResourceLink(label: string, href?: string): React.ReactNode {
@@ -357,6 +391,7 @@ class ExtensionDetailOverviewComponent extends React.Component<ExtensionDetailOv
 
 export namespace ExtensionDetailOverview {
     export interface Props extends WithStyles<typeof overviewStyles>, RouteComponentProps {
+        params: ExtensionDetailComponent.Params;
         extension: Extension;
         selectVersion: (version: string) => void;
     }

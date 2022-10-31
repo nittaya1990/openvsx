@@ -13,9 +13,13 @@ import static org.eclipse.openvsx.util.UrlUtil.addQuery;
 import static org.eclipse.openvsx.util.UrlUtil.createApiUrl;
 
 import java.net.URI;
+import java.util.HashMap;
 
 import com.google.common.base.Strings;
 
+import org.apache.commons.lang3.ArrayUtils;
+import org.eclipse.openvsx.util.TargetPlatform;
+import org.eclipse.openvsx.util.UrlUtil;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpMethod;
@@ -23,10 +27,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.RequestEntity;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
-import org.springframework.web.server.ResponseStatusException;
 
 import org.eclipse.openvsx.json.ExtensionJson;
 import org.eclipse.openvsx.json.NamespaceJson;
@@ -34,7 +36,7 @@ import org.eclipse.openvsx.json.QueryParamJson;
 import org.eclipse.openvsx.json.QueryResultJson;
 import org.eclipse.openvsx.json.ReviewListJson;
 import org.eclipse.openvsx.json.SearchResultJson;
-import org.eclipse.openvsx.search.SearchService;
+import org.eclipse.openvsx.search.ISearchService;
 import org.eclipse.openvsx.util.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,46 +58,61 @@ public class UpstreamRegistryService implements IExtensionRegistry {
 
     @Override
     public NamespaceJson getNamespace(String namespace) {
+        var requestUrl = createApiUrl(upstreamUrl, "api", namespace);
         try {
-            String requestUrl = createApiUrl(upstreamUrl, "api", namespace);
             return restTemplate.getForObject(requestUrl, NamespaceJson.class);
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
+            logger.error("GET " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
     @Override
-    public ExtensionJson getExtension(String namespace, String extension) {
+    public ExtensionJson getExtension(String namespace, String extension, String targetPlatform) {
+        var segments = new String[]{ "api", namespace, extension };
+        if(targetPlatform != null) {
+            segments = ArrayUtils.add(segments, targetPlatform);
+        }
+
+        var requestUrl = createApiUrl(upstreamUrl, segments);
         try {
-            String requestUrl = createApiUrl(upstreamUrl, "api", namespace, extension);
-            return restTemplate.getForObject(requestUrl, ExtensionJson.class);
+            var json = restTemplate.getForObject(requestUrl, ExtensionJson.class);
+            makeDownloadsCompatible(json);
+            return json;
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
+            logger.error("GET " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
     @Override
-    public ExtensionJson getExtension(String namespace, String extension, String version) {
+    public ExtensionJson getExtension(String namespace, String extension, String targetPlatform, String version) {
+        var requestUrl = UrlUtil.createApiVersionUrl(upstreamUrl, namespace, extension, targetPlatform, version);
         try {
-            String requestUrl = createApiUrl(upstreamUrl, "api", namespace, extension, version);
-            return restTemplate.getForObject(requestUrl, ExtensionJson.class);
+            var json = restTemplate.getForObject(requestUrl, ExtensionJson.class);
+            makeDownloadsCompatible(json);
+            return json;
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
+            logger.error("GET " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
     @Override
-    public ResponseEntity<byte[]> getFile(String namespace, String extension, String version, String fileName) {
-        return getFile(createApiUrl(upstreamUrl, "api", namespace, extension, version, "file", fileName));
+    public ResponseEntity<byte[]> getFile(String namespace, String extension, String targetPlatform, String version, String fileName) {
+        return getFile(UrlUtil.createApiFileUrl(upstreamUrl, namespace, extension, targetPlatform, version, fileName));
     }
 
     private ResponseEntity<byte[]> getFile(String url) {
         var upstreamLocation = URI.create(url);
         var request = new RequestEntity<Void>(HttpMethod.HEAD, upstreamLocation);
-        var response = restTemplate.exchange(request, byte[].class);
+        ResponseEntity<byte[]> response;
+        try {
+            response = restTemplate.exchange(request, byte[].class);
+        } catch(RestClientException exc) {
+            logger.error("HEAD " + url, exc);
+            throw new NotFoundException();
+        }
         var statusCode = response.getStatusCode();
         if (statusCode.is2xxSuccessful()) {
             return ResponseEntity.status(HttpStatus.FOUND)
@@ -106,64 +123,59 @@ public class UpstreamRegistryService implements IExtensionRegistry {
             return response;
         }
         if (statusCode.isError() && statusCode != HttpStatus.NOT_FOUND) {
-            logger.error("HEAD " + url + ": " + response.toString());
+            logger.error("HEAD {}: {}", url, response);
         }
         throw new NotFoundException();
     }
 
     @Override
     public ReviewListJson getReviews(String namespace, String extension) {
+        var requestUrl = createApiUrl(upstreamUrl, "api", namespace, extension, "reviews");
         try {
-            String requestUrl = createApiUrl(upstreamUrl, "api", namespace, extension, "reviews");
             return restTemplate.getForObject(requestUrl, ReviewListJson.class);
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
+            logger.error("GET " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
 	@Override
-	public SearchResultJson search(SearchService.Options options) {
-		try {
-            var searchUrl = createApiUrl(upstreamUrl, "api", "-", "search");
-            var requestUrl = addQuery(searchUrl,
+	public SearchResultJson search(ISearchService.Options options) {
+        var searchUrl = createApiUrl(upstreamUrl, "api", "-", "search");
+        var requestUrl = addQuery(searchUrl,
                 "query", options.queryString,
                 "category", options.category,
                 "size", Integer.toString(options.requestedSize),
                 "offset", Integer.toString(options.requestedOffset),
                 "sortOrder", options.sortOrder,
                 "sortBy", options.sortBy,
-                "includeAllVersions", Boolean.toString(options.includeAllVersions)
-            );
+                "includeAllVersions", Boolean.toString(options.includeAllVersions),
+                "targetPlatform", options.targetPlatform
+        );
+
+        try {
             return restTemplate.getForObject(requestUrl, SearchResultJson.class);
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
+            logger.error("GET " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
     @Override
     public QueryResultJson query(QueryParamJson param) {
+        var requestUrl = createApiUrl(upstreamUrl, "api", "-", "query");
         try {
-            String requestUrl = createApiUrl(upstreamUrl, "api", "-", "query");
             return restTemplate.postForObject(requestUrl, param, QueryResultJson.class);
         } catch (RestClientException exc) {
-            handleError(exc);
-            throw exc;
-        }
-    }
-    
-    private void handleError(Throwable exc) throws RuntimeException {
-        if (exc instanceof HttpStatusCodeException) {
-            var status = ((HttpStatusCodeException) exc).getStatusCode();
-            if (status == HttpStatus.NOT_FOUND)
-                throw new NotFoundException();
-            else
-                throw new ResponseStatusException(status,
-                        "Upstream registry responded with status \"" + status.getReasonPhrase() + "\".", exc);
-        } else if (exc.getCause() != null && exc.getCause() != exc) {
-            handleError(exc.getCause());
+            logger.error("POST " + requestUrl, exc);
+            throw new NotFoundException();
         }
     }
 
+    private void makeDownloadsCompatible(ExtensionJson json) {
+        if(json.downloads == null && json.files.containsKey("download")) {
+            json.downloads = new HashMap<>();
+            json.downloads.put(TargetPlatform.NAME_UNIVERSAL, json.files.get("download"));
+        }
+    }
 }

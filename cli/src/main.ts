@@ -35,14 +35,20 @@ module.exports = function (argv: string[]): void {
 
     const publishCmd = program.command('publish [extension.vsix]');
     publishCmd.description('Publish an extension, packaging it first if necessary.')
-        .option('--packagePath <path>', 'Package and publish the extension at the specified path.')
+        .option('-t, --target <targets...>', 'Target architectures')
+        .option('-i, --packagePath <paths...>', 'Publish the provided VSIX packages.')
         .option('--baseContentUrl <url>', 'Prepend all relative links in README.md with this URL.')
         .option('--baseImagesUrl <url>', 'Prepend all relative image links in README.md with this URL.')
         .option('--yarn', 'Use yarn instead of npm while packing extension files.')
-        .action((extensionFile: string, { packagePath, baseContentUrl, baseImagesUrl, yarn }) => {
+        .option('--pre-release', 'Mark this package as a pre-release')
+        .action((extensionFile: string, { target, packagePath, baseContentUrl, baseImagesUrl, yarn, preRelease }) => {
             if (extensionFile !== undefined && packagePath !== undefined) {
                 console.error('\u274c  Please specify either a package file or a package path, but not both.\n');
                 publishCmd.help();
+            }
+            if (extensionFile !== undefined && target !== undefined) {
+                console.warn("Ignoring option '--target' for prepackaged extension.");
+                target = undefined;
             }
             if (extensionFile !== undefined && baseContentUrl !== undefined)
                 console.warn("Ignoring option '--baseContentUrl' for prepackaged extension.");
@@ -51,21 +57,34 @@ module.exports = function (argv: string[]): void {
             if (extensionFile !== undefined && yarn !== undefined)
                 console.warn("Ignoring option '--yarn' for prepackaged extension.");
             const { registryUrl, pat } = program.opts();
-            publish({ extensionFile, registryUrl, pat, packagePath, baseContentUrl, baseImagesUrl, yarn })
-                .catch(handleError(program.debug,
-                    'See the documentation for more information:\n'
-                    + 'https://github.com/eclipse/openvsx/wiki/Publishing-Extensions'
-                ));
+            publish({ extensionFile, registryUrl, pat, targets: typeof target === 'string' ? [target] : target, packagePath: typeof packagePath === 'string' ? [packagePath] : packagePath, baseContentUrl, baseImagesUrl, yarn, preRelease })
+                .then(results => {
+                    const reasons = results.filter(result => result.status === 'rejected')
+                        .map(result => result as PromiseRejectedResult)
+                        .map(rejectedResult => rejectedResult.reason);
+
+                    if (reasons.length > 0) {
+                        const message = 'See the documentation for more information:\n'
+                        + 'https://github.com/eclipse/openvsx/wiki/Publishing-Extensions';
+                        const errorHandler = handleError(program.debug, message, false);
+                        for (const reason of reasons) {
+                            errorHandler(reason);
+                        }
+
+                        process.exit(1);
+                    }
+                });
         });
 
     const getCmd = program.command('get <namespace.extension>');
     getCmd.description('Download an extension or its metadata.')
+        .option('-t, --target <target>', 'Target architecture')
         .option('-v, --versionRange <version>', 'Specify an exact version or a version range.')
         .option('-o, --output <path>', 'Save the output in the specified file or directory.')
         .option('--metadata', 'Print the extension\'s metadata instead of downloading it.')
-        .action((extensionId: string, { versionRange, output, metadata }) => {
+        .action((extensionId: string, { target, versionRange, output, metadata }) => {
             const { registryUrl } = program.opts();
-            getExtension({ extensionId, version: versionRange, registryUrl, output, metadata })
+            getExtension({ extensionId, target: target, version: versionRange, registryUrl, output, metadata })
                 .catch(handleError(program.debug));
         });
 

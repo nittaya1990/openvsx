@@ -16,29 +16,34 @@ import static org.mockito.ArgumentMatchers.eq;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.List;
 
 import javax.persistence.EntityManager;
 
 import com.google.common.io.CharStreams;
 
+import net.javacrumbs.shedlock.core.LockProvider;
 import org.eclipse.openvsx.ExtensionService;
 import org.eclipse.openvsx.ExtensionValidator;
 import org.eclipse.openvsx.MockTransactionTemplate;
 import org.eclipse.openvsx.UserService;
-import org.eclipse.openvsx.entities.AuthToken;
-import org.eclipse.openvsx.entities.EclipseData;
-import org.eclipse.openvsx.entities.Extension;
-import org.eclipse.openvsx.entities.ExtensionVersion;
-import org.eclipse.openvsx.entities.Namespace;
-import org.eclipse.openvsx.entities.PersonalAccessToken;
-import org.eclipse.openvsx.entities.UserData;
+import org.eclipse.openvsx.adapter.VSCodeIdService;
+import org.eclipse.openvsx.cache.CacheService;
+import org.eclipse.openvsx.cache.LatestExtensionVersionCacheKeyGenerator;
+import org.eclipse.openvsx.cache.LatestExtensionVersionDTOCacheKeyGenerator;
+import org.eclipse.openvsx.entities.*;
 import org.eclipse.openvsx.repositories.RepositoryService;
-import org.eclipse.openvsx.search.SearchService;
+import org.eclipse.openvsx.search.SearchUtilService;
 import org.eclipse.openvsx.security.TokenService;
 import org.eclipse.openvsx.storage.AzureBlobStorageService;
+import org.eclipse.openvsx.storage.AzureDownloadCountService;
+import org.eclipse.openvsx.storage.DownloadCountService;
 import org.eclipse.openvsx.storage.GoogleCloudStorageService;
 import org.eclipse.openvsx.storage.StorageUtilService;
 import org.eclipse.openvsx.util.ErrorResultException;
+import org.eclipse.openvsx.util.TargetPlatform;
+import org.eclipse.openvsx.util.VersionService;
+import org.jobrunr.scheduling.JobRequestScheduler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -58,15 +63,14 @@ import org.springframework.web.client.RestTemplate;
 
 @ExtendWith(SpringExtension.class)
 @MockBean({
-    EntityManager.class, SearchService.class, GoogleCloudStorageService.class, AzureBlobStorageService.class
+    EntityManager.class, SearchUtilService.class, GoogleCloudStorageService.class, AzureBlobStorageService.class,
+    VSCodeIdService.class, DownloadCountService.class, AzureDownloadCountService.class, LockProvider.class,
+    CacheService.class, UserService.class, JobRequestScheduler.class
 })
 public class EclipseServiceTest {
 
     @MockBean
     RepositoryService repositories;
-
-    @MockBean
-    UserService users;
 
     @MockBean
     TokenService tokens;
@@ -194,14 +198,12 @@ public class EclipseServiceTest {
         extension.setName("bar");
         extension.setNamespace(namespace);
         var extVersion = new ExtensionVersion();
-        extVersion.setVersion("1");
+        extVersion.setVersion("1.0.0");
+        extVersion.setTargetPlatform(TargetPlatform.NAME_UNIVERSAL);
         extVersion.setExtension(extension);
+        extension.getVersions().add(extVersion);
         Mockito.when(repositories.findVersionsByAccessToken(accessToken, false))
             .thenReturn(Streamable.of(extVersion));
-        Mockito.when(repositories.findActiveVersions(extension, false))
-            .thenReturn(Streamable.of(extVersion));
-        Mockito.when(repositories.findActiveVersions(extension, true))
-            .thenReturn(Streamable.empty());
 
         eclipse.signPublisherAgreement(user);
 
@@ -311,6 +313,21 @@ public class EclipseServiceTest {
         @Bean
         StorageUtilService storageUtilService() {
             return new StorageUtilService();
+        }
+
+        @Bean
+        VersionService versionService() {
+            return new VersionService();
+        }
+
+        @Bean
+        LatestExtensionVersionCacheKeyGenerator latestExtensionVersionCacheKeyGenerator() {
+            return new LatestExtensionVersionCacheKeyGenerator();
+        }
+
+        @Bean
+        LatestExtensionVersionDTOCacheKeyGenerator latestExtensionVersionDTOCacheKeyGenerator() {
+            return new LatestExtensionVersionDTOCacheKeyGenerator();
         }
     }
     

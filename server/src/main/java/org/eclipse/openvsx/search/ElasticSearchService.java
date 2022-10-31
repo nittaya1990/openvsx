@@ -9,24 +9,22 @@
  ********************************************************************************/
 package org.eclipse.openvsx.search;
 
-import java.time.Duration;
-import java.time.LocalDateTime;
-import java.util.Objects;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Strings;
 
 import org.eclipse.openvsx.entities.Extension;
-import org.eclipse.openvsx.entities.ExtensionVersion;
-import org.eclipse.openvsx.entities.NamespaceMembership;
 import org.eclipse.openvsx.repositories.RepositoryService;
+import org.eclipse.openvsx.search.RelevanceService.SearchStats;
 import org.eclipse.openvsx.util.ErrorResultException;
-import org.eclipse.openvsx.util.TimeUtil;
+import org.eclipse.openvsx.util.TargetPlatform;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.aggregations.Aggregations;
 import org.elasticsearch.search.sort.SortBuilders;
 import org.elasticsearch.search.sort.SortOrder;
 import org.slf4j.Logger;
@@ -35,9 +33,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationStartedEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
-import org.springframework.data.elasticsearch.core.SearchHits;
+import org.springframework.data.elasticsearch.core.*;
 import org.springframework.data.elasticsearch.core.query.IndexQueryBuilder;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -46,16 +44,19 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StopWatch;
 
 @Component
-public class SearchService {
+public class ElasticSearchService implements ISearchService {
 
     protected final ReadWriteLock rwLock = new ReentrantReadWriteLock();
-    protected final Logger logger = LoggerFactory.getLogger(SearchService.class);
+    protected final Logger logger = LoggerFactory.getLogger(ElasticSearchService.class);
 
     @Autowired
     RepositoryService repositories;
 
     @Autowired
     ElasticsearchOperations searchOperations;
+
+    @Autowired
+    RelevanceService relevanceService;
 
     @Value("${ovsx.elasticsearch.enabled:true}")
     boolean enableSearch;
@@ -70,7 +71,7 @@ public class SearchService {
     double timestampRelevance;
     @Value("${ovsx.elasticsearch.relevance.unverified:0.5}")
     double unverifiedRelevance;
-
+    
     public boolean isEnabled() {
         return enableSearch;
     }
@@ -121,6 +122,7 @@ public class SearchService {
      * In any case, this method scans all extensions in the database and indexes their
      * relevant metadata.
      */
+    @Transactional
     public void updateSearchIndex(boolean clear) {
         var locked = false;
         try {
@@ -145,10 +147,10 @@ public class SearchService {
             if (allExtensions.isEmpty()) {
                 return;
             }
-            var stats = new SearchStats();
+            var stats = new SearchStats(repositories);
             var indexQueries = allExtensions.map(extension ->
                 new IndexQueryBuilder()
-                    .withObject(toSearchEntry(extension, stats))
+                    .withObject(relevanceService.toSearchEntry(extension, stats))
                     .build()
             ).toList();
 
@@ -171,9 +173,9 @@ public class SearchService {
         }
         try {
             rwLock.writeLock().lock();
-            var stats = new SearchStats();
+            var stats = new SearchStats(repositories);
             var indexQuery = new IndexQueryBuilder()
-                    .withObject(toSearchEntry(extension, stats))
+                    .withObject(relevanceService.toSearchEntry(extension, stats))
                     .build();
             var indexOps = searchOperations.indexOps(ExtensionSearch.class);
             searchOperations.index(indexQuery, indexOps.getIndexCoordinates());
@@ -195,65 +197,16 @@ public class SearchService {
         }
     }
 
-    protected ExtensionSearch toSearchEntry(Extension extension, SearchStats stats) {
-        var entry = extension.toSearch();
-        var ratingValue = 0.0;
-        if (entry.averageRating != null) {
-            var reviewCount = repositories.countActiveReviews(extension);
-            // Reduce the rating relevance if there are only few reviews
-            var countRelevance = saturate(reviewCount, 0.25);
-            ratingValue = (entry.averageRating / 5.0) * countRelevance;
+    public SearchHits<ExtensionSearch> search(Options options) {
+        var indexOps = searchOperations.indexOps(ExtensionSearch.class);
+        var settings = indexOps.getSettings(true);
+        var maxResultWindow = Long.parseLong(settings.get("index.max_result_window").toString());
+        var resultWindow = options.requestedOffset + options.requestedSize;
+        if(resultWindow > maxResultWindow) {
+            return new SearchHitsImpl<>(0, TotalHitsRelation.OFF, 0f, "", Collections.emptyList(), null, null);
         }
-        var downloadsValue = entry.downloadCount / stats.downloadRef;
-        var timestamp = extension.getLatest().getTimestamp();
-        var timestampValue = Duration.between(stats.oldest, timestamp).toSeconds() / stats.timestampRef;
-        entry.relevance = ratingRelevance * limit(ratingValue)
-                + downloadsRelevance * limit(downloadsValue)
-                + timestampRelevance * limit(timestampValue);
 
-        // Reduce the relevance value of unverified extensions
-        if (!isVerified(extension.getLatest())) {
-            entry.relevance *= unverifiedRelevance;
-        }
-    
-        if (Double.isNaN(entry.relevance) || Double.isInfinite(entry.relevance)) {
-            var message = "Invalid relevance for entry " + entry.namespace + "." + entry.name;
-            try {
-                message += " " + new ObjectMapper().writeValueAsString(stats);
-            } catch (JsonProcessingException exc) {
-                // Ignore exception
-            }
-            logger.error(message);
-            entry.relevance = 0.0;
-        }
-        return entry;
-    }
-
-    private double limit(double value) {
-        if (value < 0.0)
-            return 0.0;
-        else if (value > 1.0)
-            return 1.0;
-        else
-            return value;
-    }
-
-    private double saturate(double value, double factor) {
-        return 1 - 1.0 / (value * factor + 1);
-    }
-
-    private boolean isVerified(ExtensionVersion extVersion) {
-        if (extVersion.getPublishedWith() == null)
-            return false;
-        var user = extVersion.getPublishedWith().getUser();
-        var namespace = extVersion.getExtension().getNamespace();
-        return repositories.countMemberships(namespace, NamespaceMembership.ROLE_OWNER) > 0
-                && repositories.countMemberships(user, namespace) > 0;
-    }
-
-    public SearchHits<ExtensionSearch> search(Options options, Pageable pageRequest) {
-        var queryBuilder = new NativeSearchQueryBuilder()
-                .withPageable(pageRequest);
+        var queryBuilder = new NativeSearchQueryBuilder();
         if (!Strings.isNullOrEmpty(options.queryString)) {
             var boolQuery = QueryBuilders.boolQuery();
 
@@ -284,16 +237,60 @@ public class SearchService {
             // Filter by selected category
             queryBuilder.withFilter(QueryBuilders.matchPhraseQuery("categories", options.category));
         }
+        if (TargetPlatform.isValid(options.targetPlatform)) {
+            // Filter by selected target platform
+            queryBuilder.withFilter(QueryBuilders.matchPhraseQuery("targetPlatforms", options.targetPlatform));
+        }
+        if (options.namespacesToExclude != null) {
+            // Exclude namespaces
+            for(var namespaceToExclude : options.namespacesToExclude) {
+                queryBuilder.withFilter(QueryBuilders.boolQuery().mustNot(QueryBuilders.matchPhraseQuery("namespace", namespaceToExclude)));
+            }
+        }
 
         // Sort search results according to 'sortOrder' and 'sortBy' options
         sortResults(queryBuilder, options.sortOrder, options.sortBy);
-        
-        try {
-            rwLock.readLock().lock();
-            var indexOps = searchOperations.indexOps(ExtensionSearch.class);
-            return searchOperations.search(queryBuilder.build(), ExtensionSearch.class, indexOps.getIndexCoordinates());
-        } finally {
-            rwLock.readLock().unlock();
+
+        var pages = new ArrayList<Pageable>();
+        pages.add(PageRequest.of(options.requestedOffset / options.requestedSize, options.requestedSize));
+        if(options.requestedOffset % options.requestedSize > 0) {
+            // size is not exact multiple of offset; this means we need to get two pages
+            // e.g. when offset is 20 and size is 50, you want results 20 to 70 which span pages 0 and 1 of a 50 item page
+            pages.add(pages.get(0).next());
+        }
+
+        var searchHitsList = new ArrayList<SearchHits<ExtensionSearch>>(pages.size());
+        for(var page : pages) {
+            queryBuilder.withPageable(page);
+            try {
+                rwLock.readLock().lock();
+                var searchHits = searchOperations.search(queryBuilder.build(), ExtensionSearch.class, indexOps.getIndexCoordinates());
+                searchHitsList.add(searchHits);
+            } finally {
+                rwLock.readLock().unlock();
+            }
+        }
+
+        if(searchHitsList.size() == 2) {
+            var firstSearchHitsPage = searchHitsList.get(0);
+            var secondSearchHitsPage = searchHitsList.get(1);
+
+            List<SearchHit<ExtensionSearch>> searchHits = new ArrayList<>(firstSearchHitsPage.getSearchHits());
+            searchHits.addAll(secondSearchHitsPage.getSearchHits());
+            var endIndex = Math.min(searchHits.size(), options.requestedOffset + options.requestedSize);
+            var startIndex = Math.min(endIndex, options.requestedOffset);
+            searchHits = searchHits.subList(startIndex, endIndex);
+            return new SearchHitsImpl<>(
+                    firstSearchHitsPage.getTotalHits(),
+                    firstSearchHitsPage.getTotalHitsRelation(),
+                    firstSearchHitsPage.getMaxScore(),
+                    null,
+                    searchHits,
+                    null,
+                    null
+            );
+        } else {
+            return searchHitsList.get(0);
         }
     }
 
@@ -320,71 +317,4 @@ public class SearchService {
                     "sortBy parameter must be 'relevance', 'timestamp', 'averageRating' or 'downloadCount'");
         }
     }
-
-    public static class Options {
-        public final String queryString;
-        public final String category;
-        public final int requestedSize;
-        public final int requestedOffset;
-        public final String sortOrder;
-        public final String sortBy;
-        public final boolean includeAllVersions;
-
-        public Options(String queryString, String category, int size, int offset, String sortOrder,
-                String sortBy, boolean includeAllVersions) {
-            this.queryString = queryString;
-            this.category = category;
-            this.requestedSize = size;
-            this.requestedOffset = offset;
-            this.sortOrder = sortOrder;
-            this.sortBy = sortBy;
-            this.includeAllVersions = includeAllVersions;
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (obj == this)
-                return true;
-            if (!(obj instanceof Options))
-                return false;
-            var other = (Options) obj;
-            if (!Objects.equals(this.queryString, other.queryString))
-                return false;
-            if (!Objects.equals(this.category, other.category))
-                return false;
-            if (this.requestedSize != other.requestedSize)
-                return false;
-            if (this.requestedOffset != other.requestedOffset)
-                return false;
-            if (!Objects.equals(this.sortOrder, other.sortOrder))
-                return false;
-            if (!Objects.equals(this.sortBy, other.sortBy))
-                return false;
-            if (this.includeAllVersions != other.includeAllVersions)
-                return false;
-            return true;
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(queryString, category, requestedSize, requestedOffset, sortOrder, sortBy,
-                    includeAllVersions);
-        }
-    }
-
-    protected class SearchStats {
-        protected final double downloadRef;
-        protected final double timestampRef;
-        protected final LocalDateTime oldest;
-
-        public SearchStats() {
-            var now = TimeUtil.getCurrentUTC();
-            var maxDownloads = repositories.getMaxExtensionDownloadCount();
-            var oldestTimestamp = repositories.getOldestExtensionTimestamp();
-            this.downloadRef = maxDownloads * 1.5 + 100;
-            this.oldest = oldestTimestamp == null ? now : oldestTimestamp;
-            this.timestampRef = Duration.between(this.oldest, now).toSeconds() + 60;
-        }
-    }
-
 }
